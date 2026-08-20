@@ -1,0 +1,13 @@
+# Rust
+/target/
+
+# C/C++ builds and generated compilation database
+/build/
+/compile_commands.json
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+*.user
+.DS_Store
+Thumbs.db
