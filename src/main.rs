@@ -13,7 +13,7 @@ use calljet::semantic::clang::ClangProvider;
 fn main() {
     let cli = Cli::parse();
 
-    let (input, request) = match cli.into_request() {
+    let (input, request, render_options) = match cli.into_execution_plan() {
         Ok(req) => req,
         Err(err) => {
             eprintln!("입력 오류: {err}");
@@ -40,12 +40,19 @@ fn main() {
         }
     };
 
+    let output_file = render_options.output_file.clone();
     let renderer = HumanRenderer::new();
-    let rendered = renderer.render(&project, &result);
+    let rendered = renderer.render_with_options(&project, &result, render_options);
 
-    if !rendered.stdout.is_empty() {
+    if let Some(path) = output_file {
+        if let Err(e) = std::fs::write(&path, &rendered.stdout) {
+            eprintln!("출력 파일 작성 실패 ('{}'): {e}", path.display());
+            process::exit(1);
+        }
+    } else if !rendered.stdout.is_empty() {
         print!("{}", rendered.stdout);
     }
+
     if !rendered.stderr.is_empty() {
         eprint!("{}", rendered.stderr);
     }

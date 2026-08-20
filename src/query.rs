@@ -84,6 +84,32 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         };
 
         metrics.total_query_time = total_start.elapsed();
+
+        // 검증된 파일 및 스킵된 파일 목록 계산
+        let all_sources = self.project.source_files();
+        let mut verified_files = BTreeSet::new();
+        for edge in &result.edges {
+            verified_files.insert(edge.callsite.start.file.clone());
+        }
+        for sym in result.symbols.values() {
+            if let Some(loc) = &sym.declaration {
+                verified_files.insert(loc.file.clone());
+            }
+            if let Some(loc) = &sym.definition {
+                verified_files.insert(loc.file.clone());
+            }
+        }
+
+        let mut skipped_files = Vec::new();
+        for src in &all_sources {
+            if !verified_files.contains(src) {
+                skipped_files.push(src.clone());
+            }
+        }
+
+        metrics.verified_source_files = verified_files.into_iter().collect();
+        metrics.skipped_source_files = skipped_files;
+
         let mut final_res = result;
         final_res.metrics = metrics;
 

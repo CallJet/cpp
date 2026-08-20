@@ -1,132 +1,145 @@
-<img width="2172" height="724" alt="Image" src="https://github.com/user-attachments/assets/cbf6f281-8833-49f6-b855-74eb3addacd1" />
+<div align="center">
+  <img src="resources/CallJet_Banner.png" alt="CallJet Banner" width="100%">
+</div>
 
 # CallJet C++
 
 > **Find the path. Skip the whole graph.**  
-> 전체 코드베이스의 거대한 시맨틱 호출 그래프를 미리 빌드하지 않고, 필요한 경로만 온디맨드로 분석하는 고속 C/C++ 정적 호출 경로 분석기(Static Call Path Analyzer).
+> Fast, on-demand static call path analysis for C and C++ without building the entire semantic call graph upfront.
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org/)
+
+[English](README.md) | [한국어 (Korean)](README.ko.md)
 
 ---
 
-## 📌 핵심 원리 (Core Principle)
+## 📌 Core Principle
 
-기존 도구들은 전체 프로젝트를 빌드하거나 모든 소스 파일에 대해 Clang AST를 생성하느라 수 분~수십 분이 소요됩니다. CallJet은 2단계 하이브리드 파이프라인으로 이를 해결합니다:
+Traditional static analysis tools parse the entire codebase with a compiler front-end (such as Clang), often taking minutes to tens of minutes just to answer a focused question. CallJet solves this with a **two-phase hybrid demand-driven pipeline**:
 
-1. **Tree-sitter 경량 구문 탐색 (Candidate Discovery)**: 밀리초(ms) 단위로 전체 프로젝트의 구문을 파싱하여 호출 후보 및 역방향 피호출자 인덱스를 생성합니다.
-2. **Clang 온디맨드 시맨틱 검증 (Demand-Driven Verification)**: 쿼리 순회 프론티어에서 **실제로 필요한 번역 단위(Translation Unit)만** 선별적으로 Clang 시맨틱 검증을 수행합니다.
+1. **Tree-sitter Fast Candidate Discovery**: Syntactically scans the entire project in milliseconds to extract candidate call sites, declarations, definitions, and reverse lookup indexes (`calls_by_spelling`).
+2. **Clang Demand-Driven Semantic Verification**: Leverages `libclang` C FFI to semantically verify **only the specific Translation Units (TUs) required along the query's active traversal frontier**.
 
 ---
 
-## 🛠 사전 요구사항 (Prerequisites)
+## 🛠 Prerequisites
 
-* **Rust**: `1.80` 이상 (Cargo 포함)
-* **LLVM / Clang**: `libclang` (버전 16 이상 권장)
-  * **Windows**: `winget install LLVM.LLVM` 또는 [LLVM 공식 릴리스](https://github.com/llvm/llvm-project/releases) 설치
+* **Rust**: `1.80` or newer (with Cargo)
+* **LLVM / Clang**: `libclang` (v16+ recommended)
+  * **Windows**: `winget install LLVM.LLVM` or download from [LLVM Releases](https://github.com/llvm/llvm-project/releases)
   * **Linux (Ubuntu/Debian)**: `sudo apt-get install libclang-dev clang`
   * **macOS**: `brew install llvm`
-* **Compilation Database**: 프로젝트의 `compile_commands.json`
-  * CMake 사용 시: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+* **Compilation Database**: `compile_commands.json` for your project
+  * When using CMake: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
 
 ---
 
-## 🚀 빌드 및 설치 (Build & Installation)
+## 🚀 Build & Installation
 
 ```bash
-# 저장소 클론 후 cpp 디렉토리로 이동
+# Clone repository and navigate to cpp directory
 cd cpp
 
-# 릴리스 바이너리 빌드
+# Build optimized release binary
 cargo build --release
 
-# 생성된 실행 파일 위치: target/release/calljet (또는 target/release/calljet.exe)
+# The executable will be at: target/release/calljet (or target/release/calljet.exe on Windows)
 ```
 
 ---
 
-## 💻 실행 방법 및 CLI 사용 가이드 (Usage)
+## 💻 CLI Usage Guide
 
-CallJet은 4가지 핵심 쿼리 명령어를 제공합니다.
+CallJet provides 4 core query commands.
 
-### 1. `callers` — 역방향 호출자 탐색
-특정 함수/심볼을 호출하는 모든 상위 함수 체인을 온디맨드로 역추적합니다.
+### 1. `callers` — Reverse Caller Traversal
+Finds all callers that lead to a specific target function/symbol on demand.
 
 ```bash
 calljet callers <TARGET_SYMBOL> [OPTIONS]
 
-# 예시: LeafFunction을 호출하는 모든 경로 탐색
+# Example: Find all callers of LeafFunction
 calljet callers LeafFunction --root . --compile-commands build/compile_commands.json
 
-# 예시: 최대 2단계 상위 호출자까지만 탐색
+# Example: Limit search depth to 2 hops
 calljet callers Math::Calculator::add --max-depth 2
 
-# 예시: 확정된(CONFIRMED) 직접 호출만 필터링하여 순회
+# Example: Traverse only verified direct calls (CONFIRMED)
 calljet callers process_data --verified-only
 ```
 
 ---
 
-### 2. `callees` — 순방향 피호출자 탐색
-특정 함수/심볼 내부에서 호출하는 하위 함수 체인을 온디맨드로 순방향 추적합니다.
+### 2. `callees` — Forward Callee Traversal
+Finds all downstream functions invoked from a given source function/symbol on demand.
 
 ```bash
 calljet callees <SOURCE_SYMBOL> [OPTIONS]
 
-# 예시: main 함수에서 출발하는 모든 하위 호출 관계 탐색
+# Example: Find all callees starting from main
 calljet callees main --root .
 
-# 예시: 네임스페이스 및 클래스 메서드 지정
+# Example: Target a qualified C++ method
 calljet callees "App::Controller::handle_request"
 ```
 
 ---
 
-### 3. `path` — 최단 호출 경로 탐색
-시작 심볼(`source`)에서 도착 심볼(`target`)까지의 구체적인 호출 경로(Call Path)를 도출합니다.
+### 3. `path` — Shortest Call Path Discovery
+Finds the shortest call path from a `<source>` symbol to a `<target>` symbol.
 
 ```bash
 calljet path <SOURCE_SYMBOL> <TARGET_SYMBOL> [OPTIONS]
 
-# 예시: handle_packet에서 send_response로 도달하는 호출 경로 탐색
+# Example: Trace path from handle_packet to send_response
 calljet path handle_packet send_response --compile-commands build/compile_commands.json
 
-# 예시: 최대 5단계 이내의 경로만 탐색
+# Example: Bounded path search within 5 hops
 calljet path main calculate_checksum --max-depth 5
 ```
 
 ---
 
-### 4. `explain` — 단일 호출 엣지 상세 검증 및 근거
-호출자(`caller`)와 피호출자(`callee`) 사이의 호출 엣지가 존재하는 이유와 Clang 시맨틱 검증 근거를 상세 출력합니다.
+### 4. `explain` — Call Edge Evidence Explanation
+Inspects the semantic verification evidence between a `<caller>` and a `<callee>`.
 
 ```bash
 calljet explain <CALLER_SYMBOL> <CALLEE_SYMBOL> [OPTIONS]
 
-# 예시: process_event 내부의 dispatch 호출 검증 사유 확인
+# Example: Explain why dispatch is called inside process_event
 calljet explain process_event dispatch
 ```
 
 ---
 
-## ⚙️ 공통 옵션 (Global Options)
+## ⚙️ Options
 
-| 옵션 | 단축 | 기본값 | 설명 |
+| Option | Short | Default | Description |
 | --- | :---: | --- | --- |
-| `--root <PATH>` | `-r` | `.` (현재 디렉토리) | 프로젝트 소스 루트 디렉토리 경로 |
-| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | `compile_commands.json` 파일 경로 |
-| `--max-depth <N>` | `-d` | 무제한 (사이클 자동 감지) | 순회 탐색의 최대 깊이 제한 |
-| `--verified-only` | `-v` | `false` | `[CONFIRMED]` 신뢰도를 가진 엣지만 순회 |
-| `--help` | `-h` | - | 도움말 출력 |
+| `--root <PATH>` | `-r` | `.` (current directory) | Root directory of the source project |
+| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | Path to `compile_commands.json` |
+| `--format <FORMAT>` | `-f` | `text` | Output format (`text`, `json`, `mermaid`, `dot`) |
+| `--output <FILE>` | `-o` | stdout | Save result directly to a specified output file |
+| `--max-depth <N>` | `-d` | Unbounded | Maximum traversal depth limit |
+| `--verified-only` | - | `false` | Filter traversal to only `[CONFIRMED]` edges |
+| `--no-unresolved` | - | `false` | Exclude `[UNRESOLVED]` indirect edges from results |
+| `--no-foreign` | - | `false` | Exclude foreign external library boundary calls |
+| `--metrics` | - | `false` | Output detailed timing and performance metrics |
+| `--verbose` | - | `false` | Display detailed per-file Translation Unit (TU) breakdown report |
+| `--help` | `-h` | - | Display help information |
 
 ---
 
-## 📊 결과 출력 및 신뢰도 모델 (Confidence Model)
+## 📊 Result Output & Confidence Model
 
-CallJet은 정적 분석의 한계를 솔직하게 표시하는 3단계 신뢰도(Confidence) 시스템을 사용합니다:
+CallJet employs an honest **3-state Confidence Model**:
 
-* **`[CONFIRMED]`**: Clang을 통해 정적으로 정확한 대상 심볼이 확인된 직접 호출 (Direct call)
-* **`[POSSIBLE]`**: 가상 함수(Virtual dispatch) 등 런타임에 여러 타겟으로 분기될 수 있는 호출
-* **`[UNRESOLVED]`**: 함수 포인터 등 정적으로 대상을 확정할 수 없는 호출
+* **`[CONFIRMED]`**: Statically proven direct call verified by Clang.
+* **`[POSSIBLE]`**: Valid candidate with multiple runtime targets (e.g. virtual method dispatch).
+* **`[UNRESOLVED]`**: Semantic call target could not be statically determined (e.g. indirect function pointer).
 
-### 출력 예시 (`calljet callers c_leaf`)
+### Example Output (`calljet callers c_leaf`)
 ```text
 === 호출 관계 (Call Edges) ===
 • [CONFIRMED] c_mid -> c_leaf (direct, at src/c_chain.c:3:16-24)
@@ -143,34 +156,34 @@ CallJet은 정적 분석의 한계를 솔직하게 표시하는 3단계 신뢰�
 
 ---
 
-## 🚦 프로세스 종료 코드 (Exit Codes)
+## 🚦 Exit Status Codes
 
-| 종료 코드 | 상태 | 의미 |
+| Exit Code | Completion Status | Meaning |
 | :---: | --- | --- |
-| **`0`** | `Complete` / `NoResult` / `Truncated` | 정상 완료 (결과 없음 또는 깊이 제한 도달 포함) |
-| **`1`** | `Partial` / `InputError` / `QueryError` | 부분 분석 실패(일부 TU 오류) 또는 입력 오류 / 심볼 미발견 |
-| **`2`** | `FatalError` | 심각한 내부 오류 또는 libclang 로드 실패 |
+| **`0`** | `Complete` / `NoResult` / `Truncated` | Successful query (including empty results or depth bound reached) |
+| **`1`** | `Partial` / `InputError` / `QueryError` | Partial analysis due to some TU errors, input error, or symbol not found |
+| **`2`** | `FatalError` | Internal error or failure to load libclang |
 
 ---
 
-## 🧪 테스트 및 벤치마크 실행
+## 🧪 Testing & Benchmarks
 
 ```bash
-# 전체 테스트 실행 (단위, Clang FFI, 쿼리 엔진, 인수 테스트 스위트)
+# Run all unit, Clang FFI, traversal, and CLI tests
 cargo test
 
-# SRS Acceptance Criteria (AC-001 ~ AC-018) 전수 테스트 실행
+# Run formal SRS Acceptance Criteria (AC-001 ~ AC-018) suite
 cargo test --test acceptance_suite_tests
 
-# PoC 아키텍처 가설 벤치마크 실측 실행
+# Run PoC Architectural Hypothesis Benchmark
 cargo test --test benchmark_measurements -- --nocapture
 ```
 
 ---
 
-## 📚 설계 문서 (Documentation)
+## 📚 Documentation
 
-* [제품 컨셉 (Concept)](docs/concept.md) — 제품 철학 및 범위 기준
-* [요구사항 명세서 (SRS)](docs/srs.md) — 81개 기능 요구사항 및 인수 기준(AC)
-* [설계 명세서 (SDS)](docs/sds.md) — 아키텍처, 데이터 모델, 쿼리 알고리즘
-* [벤치마크 실측 보고서](docs/benchmark_report.md) — PoC 벤치마크 및 TU 절감 실측치
+* [Product Concept](docs/concept.md) — Problem statement, product scope, and core philosophy
+* [Software Requirements Specification (SRS)](docs/srs.md) — 81 functional requirements and acceptance criteria
+* [Software Design Specification (SDS)](docs/sds.md) — Implementation architecture, data models, and algorithms
+* [PoC Benchmark Report](docs/benchmark_report.md) — Empirical TU reduction and performance measurements

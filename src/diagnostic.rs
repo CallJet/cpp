@@ -1,12 +1,11 @@
-//! 진단 및 오류 타입 정의 모듈
-//! Diagnostic and error types definition module
-
-use crate::model::{CompilationKey, SourceLocation};
+use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::model::{CompilationKey, SourceLocation};
+
 /// 진단 심각도 (Diagnostic Severity)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum Severity {
     /// 치명적 오류 (Fatal Error)
     Fatal,
@@ -15,7 +14,7 @@ pub enum Severity {
 }
 
 /// 시스템 내부 오류 (Internal Error)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum InternalError {
     /// 불변식 위반 (Invariant Violation)
     InvariantViolation(String),
@@ -37,7 +36,7 @@ impl fmt::Display for InternalError {
 impl std::error::Error for InternalError {}
 
 /// 입력 유효성 검증 오류 (Input Validation Error)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum InputError {
     /// 소스 루트 경로가 존재하지 않거나 디렉토리가 아님
     InvalidSourceRoot { path: PathBuf, reason: String },
@@ -85,7 +84,7 @@ impl fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 /// 쿼리 대상 식별 오류 (Query Target Error)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum QueryError {
     /// 일치하는 심볼을 찾을 수 없음 (Symbol Not Found)
     SymbolNotFound { query: String },
@@ -121,7 +120,7 @@ impl fmt::Display for QueryError {
 impl std::error::Error for QueryError {}
 
 /// 분석 원인 구분 (Analysis Cause)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum AnalysisCause {
     /// 번역 단위(TU) 파싱 실패
     TranslationUnitParseFailed,
@@ -134,7 +133,7 @@ pub enum AnalysisCause {
 }
 
 /// 분석 진행 중 발생한 문제 (Analysis Issue)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnalysisIssue {
     /// 심각도
     pub severity: Severity,
@@ -162,7 +161,7 @@ impl fmt::Display for AnalysisIssue {
 }
 
 /// 통합 진단 열거형 (Diagnostic)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Diagnostic {
     /// 사용자 입력 오류
     Input(InputError),
@@ -195,7 +194,7 @@ impl fmt::Display for Diagnostic {
 impl std::error::Error for Diagnostic {}
 
 /// 치명적 쿼리 실패 에러 (Fatal Error)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FatalError {
     /// 입력 검증 실패
     Input(InputError),

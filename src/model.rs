@@ -1,6 +1,4 @@
-//! 핵심 도메인 모델 정의 모듈
-//! Core domain model definition module
-
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -9,7 +7,7 @@ use std::time::Duration;
 use crate::diagnostic::Diagnostic;
 
 /// 분석 대상 언어 (Programming Language)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum Language {
     /// C 언어
     C,
@@ -27,7 +25,7 @@ impl fmt::Display for Language {
 }
 
 /// 1부터 시작하는 소스 행/열 위치 (1-based Line/Column coordinates)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct LineColumn {
     /// 행 번호 (1-based)
     pub line: u32,
@@ -42,7 +40,7 @@ impl fmt::Display for LineColumn {
 }
 
 /// 소스 위치 (Source Location)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SourceLocation {
     /// 파일 경로 (정규화된 경로)
     pub file: PathBuf,
@@ -79,7 +77,7 @@ impl fmt::Display for SourceLocation {
 }
 
 /// 소스 범위 (Source Range)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SourceRange {
     /// 시작 위치 (Start Location)
     pub start: SourceLocation,
@@ -118,11 +116,11 @@ impl fmt::Display for SourceRange {
 }
 
 /// 구문적 후보 심볼 식별자 (Candidate Symbol ID)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CandidateSymbolId(pub u32);
 
 /// 후보 심볼 종류 (Syntactic Kind)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum CandidateSymbolKind {
     /// 일반 함수 (Free Function)
     Function,
@@ -133,7 +131,7 @@ pub enum CandidateSymbolKind {
 }
 
 /// Tree-sitter 구문 분석으로 발견된 후보 심볼 (Candidate Symbol)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateSymbol {
     /// 후보 심볼 고유 식별자
     pub id: CandidateSymbolId,
@@ -158,7 +156,7 @@ pub struct CandidateSymbol {
 }
 
 /// 후보 심볼 중복 제거용 키 (Candidate Symbol Deduplication Key)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CandidateSymbolKey {
     pub file: PathBuf,
     pub declaration_range: SourceRange,
@@ -166,11 +164,11 @@ pub struct CandidateSymbolKey {
 }
 
 /// 구문적 후보 호출 식별자 (Candidate Call ID)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CandidateCallId(pub u32);
 
 /// 후보 호출 구문 힌트 종류 (Candidate Call Kind Hint)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum CandidateCallKind {
     /// 일반 함수 호출
     Direct,
@@ -183,7 +181,7 @@ pub enum CandidateCallKind {
 }
 
 /// 구문 분석으로 발견된 후보 호출 위치 (Candidate Call Site)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateCallSite {
     /// 후보 호출 식별자
     pub id: CandidateCallId,
@@ -204,7 +202,7 @@ pub struct CandidateCallSite {
 }
 
 /// 후보 호출 중복 제거용 키 (Candidate Call Deduplication Key)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CandidateCallKey {
     pub file: PathBuf,
     pub expression_range: SourceRange,
@@ -213,7 +211,7 @@ pub struct CandidateCallKey {
 }
 
 /// 백엔드 정규 심볼 식별자 (Backend Canonical Symbol ID)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum BackendSymbolId {
     /// Clang USR (Unified Symbol Resolution) 문자열
     ClangUsr(String),
@@ -227,7 +225,7 @@ pub enum BackendSymbolId {
 }
 
 /// 언어 중립적 정규 심볼 식별자 (Canonical Symbol ID)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SymbolId {
     /// 언어 종류
     pub language: Language,
@@ -246,7 +244,7 @@ impl SymbolId {
 }
 
 /// 정규화된 심볼 정보 (Canonical Symbol)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Symbol {
     /// 정규 심볼 ID
     pub id: SymbolId,
@@ -275,7 +273,7 @@ impl Symbol {
 
 /// 호출 신뢰도 상태 (Call Confidence State)
 /// 주의: initial CallJet에서는 PROBABLE 상태가 없으며(FR-076), 오직 3가지 상태만 존재합니다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum Confidence {
     /// 시맨틱 증거로 고유한 피호출자가 완전히 확정됨 (Confirmed)
     Confirmed,
@@ -296,7 +294,7 @@ impl fmt::Display for Confidence {
 }
 
 /// 호출 형태 분류 (Call Kind)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum CallKind {
     /// 직접 호출 (Direct Call)
     Direct,
@@ -329,7 +327,7 @@ impl fmt::Display for CallKind {
 }
 
 /// 검증 근거 사유 (Verification Reason)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum VerificationReason {
     /// 정확한 정규 참조 일치
     ExactReference,
@@ -346,14 +344,14 @@ pub enum VerificationReason {
 }
 
 /// 시맨틱 진단 정보
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SemanticDiagnostic {
     pub message: String,
     pub location: Option<SourceLocation>,
 }
 
 /// 검증 근거 및 출처 정보 (Verification Evidence)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationEvidence {
     /// 호출 표현식 원문 (선택적)
     pub expression_text: Option<String>,
@@ -378,11 +376,11 @@ pub struct VerificationEvidence {
 }
 
 /// 컴파일 컨텍스트 고유 키 (Compilation Key)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CompilationKey(pub String);
 
 /// 컴파일 컨텍스트 (Compilation Context)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompilationContext {
     /// 고유 키
     pub key: CompilationKey,
@@ -395,11 +393,11 @@ pub struct CompilationContext {
 }
 
 /// 검증된 호출 엣지 식별자 (Call Edge ID)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CallEdgeId(pub u32);
 
 /// 검증된 호출 엣지 (Call Edge)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallEdge {
     /// 엣지 고유 번호
     pub id: CallEdgeId,
@@ -420,7 +418,7 @@ pub struct CallEdge {
 }
 
 /// 검증된 엣지 중복 판정 키 (Verified Edge Key)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct VerifiedEdgeKey {
     pub caller: SymbolId,
     pub callee: Option<SymbolId>,
@@ -430,7 +428,7 @@ pub struct VerifiedEdgeKey {
 }
 
 /// 사용자 심볼 쿼리 (Symbol Query from user)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SymbolQuery {
     /// 원본 쿼리 문자열
     pub raw: String,
@@ -463,7 +461,7 @@ impl SymbolQuery {
 }
 
 /// CLI 쿼리 요청 종류 (Query Request)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum QueryRequest {
     /// 호출자 탐색 (Callers)
     Callers {
@@ -492,7 +490,7 @@ pub enum QueryRequest {
 }
 
 /// 호출 경로 노드 및 엣지 시퀀스 (Call Path)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallPath {
     /// 노드 시퀀스 (Symbols)
     pub nodes: Vec<SymbolId>,
@@ -501,7 +499,7 @@ pub struct CallPath {
 }
 
 /// 쿼리 완료 상태 (Completion Status)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Completion {
     /// 온전하게 탐색 완료 (Complete)
     Complete,
@@ -514,7 +512,7 @@ pub enum Completion {
 }
 
 /// 결과 건수 요약 (Result Counts)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct ResultCounts {
     /// 발견된 총 심볼 수
     pub total_symbols: usize,
@@ -529,7 +527,7 @@ pub struct ResultCounts {
 }
 
 /// 쿼리 실행 메트릭 (Query Performance Metrics)
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct QueryMetrics {
     /// 검사된 소스 파일 수
     pub source_files_inspected: usize,
@@ -559,10 +557,14 @@ pub struct QueryMetrics {
     pub total_query_time: Duration,
     /// 대략적/최대 메모리 사용량 (Bytes)
     pub peak_resident_memory_bytes: u64,
+    /// 시맨틱 검증이 수행된 소스 파일 목록 (Verified Source Files)
+    pub verified_source_files: Vec<PathBuf>,
+    /// 시맨틱 파싱을 회피(스킵)한 소스 파일 목록 (Skipped Source Files)
+    pub skipped_source_files: Vec<PathBuf>,
 }
 
 /// 통합 쿼리 결과 (Query Result)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueryResult {
     /// 완료 상태
     pub completion: Completion,

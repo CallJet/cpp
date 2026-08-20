@@ -24,11 +24,26 @@ pub fn ensure_libclang_loaded() -> bool {
     let mut success = true;
     INIT_CLANG.call_once(|| {
         if !clang_sys::is_loaded() && clang_sys::load().is_err() {
-            // 일반적인 LLVM 기본 경로 시도
+            // 운영체제별 표준 LLVM / libclang 기본 경로 목록
             let possible_paths = [
+                // Windows
                 r"C:\Program Files\LLVM\bin",
                 r"C:\Program Files (x86)\LLVM\bin",
                 r"C:\LLVM\bin",
+                // macOS (Homebrew Apple Silicon & Intel, Xcode CLT)
+                "/opt/homebrew/opt/llvm/lib",
+                "/usr/local/opt/llvm/lib",
+                "/Library/Developer/CommandLineTools/usr/lib",
+                // Linux (Debian/Ubuntu, Fedora/RHEL, Arch)
+                "/usr/lib/llvm-19/lib",
+                "/usr/lib/llvm-18/lib",
+                "/usr/lib/llvm-17/lib",
+                "/usr/lib/llvm-16/lib",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/aarch64-linux-gnu",
+                "/usr/lib64",
+                "/usr/lib",
+                "/usr/local/lib",
             ];
             let mut loaded = false;
             for p in possible_paths {

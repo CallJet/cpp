@@ -1,11 +1,22 @@
-//! CLI 인자 파싱 및 요청 구성 모듈
-//! CLI argument parsing and request construction module
-
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::diagnostic::InputError;
 use crate::model::{QueryRequest, SymbolQuery};
+
+/// 출력 형식 (Output Format)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// 기본 사람이 읽기 쉬운 텍스트 형식
+    #[default]
+    Text,
+    /// JSON 형식 (자동화 및 도구 연동용)
+    Json,
+    /// Mermaid 다이어그램 형식 (마크다운 임베드용)
+    Mermaid,
+    /// Graphviz DOT 다이어그램 형식
+    Dot,
+}
 
 /// CallJet C++ — C/C++ 소스 온디맨드 정적 호출 경로 분석 도구
 #[derive(Debug, Parser)]
@@ -26,24 +37,59 @@ pub struct Cli {
 #[derive(Debug, Args, Clone)]
 pub struct CommonOptions {
     /// 분석 대상 소스 루트 디렉토리 (기본값: 현재 디렉토리)
-    #[arg(long, value_name = "PATH", global = true)]
+    #[arg(short = 'r', long = "root", value_name = "PATH", global = true)]
     pub root: Option<PathBuf>,
 
     /// compile_commands.json 파일 경로 (기본값: <root>/compile_commands.json)
-    #[arg(long = "compile-commands", value_name = "PATH", global = true)]
+    #[arg(
+        short = 'c',
+        long = "compile-commands",
+        value_name = "PATH",
+        global = true
+    )]
     pub compile_commands: Option<PathBuf>,
+
+    /// 출력 결과 포맷 (text, json, mermaid, dot)
+    #[arg(
+        short = 'f',
+        long = "format",
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        global = true
+    )]
+    pub format: OutputFormat,
+
+    /// 결과를 파일로 직접 저장할 경로 (선택적)
+    #[arg(short = 'o', long = "output", value_name = "FILE", global = true)]
+    pub output: Option<PathBuf>,
+
+    /// 타이밍 및 메모리 등 성능 메트릭 상세 출력
+    #[arg(long = "metrics", default_value_t = false, global = true)]
+    pub metrics: bool,
+
+    /// 상세 분석 메트릭 및 번역 단위(TU) 파일 목록 출력
+    #[arg(long = "verbose", default_value_t = false, global = true)]
+    pub verbose: bool,
 }
 
 /// 탐색 제어 옵션 (Traversal Options)
 #[derive(Debug, Args, Clone)]
 pub struct TraversalOptions {
     /// 최대 탐색 깊이 제한 (지정하지 않을 경우 무제한 탐색)
-    #[arg(long = "max-depth", value_name = "N")]
+    #[arg(short = 'd', long = "max-depth", value_name = "N")]
     pub max_depth: Option<usize>,
 
     /// 시맨틱 검증으로 완전히 확정(CONFIRMED)된 엣지만 결과에 포함
     #[arg(long = "verified-only", default_value_t = false)]
     pub verified_only: bool,
+
+    /// 미해결(UNRESOLVED) 엣지를 결과에서 제외
+    #[arg(long = "no-unresolved", default_value_t = false)]
+    pub no_unresolved: bool,
+
+    /// 외부 라이브러리(Foreign) 호출 엣지를 결과에서 제외
+    #[arg(long = "no-foreign", default_value_t = false)]
+    pub no_foreign: bool,
 }
 
 /// 서브커맨드 정의 (Commands)
@@ -117,9 +163,11 @@ pub struct ProjectInput {
 }
 
 impl Cli {
-    /// 파싱된 CLI로부터 ProjectInput 및 QueryRequest 추출
-    pub fn into_request(self) -> Result<(ProjectInput, QueryRequest), InputError> {
-        let (common, request) = match self.command {
+    /// 파싱된 CLI로부터 ProjectInput, QueryRequest, RenderOptions 추출
+    pub fn into_execution_plan(
+        self,
+    ) -> Result<(ProjectInput, QueryRequest, crate::render::RenderOptions), InputError> {
+        let (common, request, no_unresolved, no_foreign) = match self.command {
             Commands::Callers {
                 target,
                 common,
@@ -133,6 +181,8 @@ impl Cli {
                         max_depth: traversal.max_depth,
                         verified_only: traversal.verified_only,
                     },
+                    traversal.no_unresolved,
+                    traversal.no_foreign,
                 )
             }
             Commands::Callees {
@@ -148,6 +198,8 @@ impl Cli {
                         max_depth: traversal.max_depth,
                         verified_only: traversal.verified_only,
                     },
+                    traversal.no_unresolved,
+                    traversal.no_foreign,
                 )
             }
             Commands::Path {
@@ -166,6 +218,8 @@ impl Cli {
                         max_depth: traversal.max_depth,
                         verified_only: traversal.verified_only,
                     },
+                    traversal.no_unresolved,
+                    traversal.no_foreign,
                 )
             }
             Commands::Explain {
@@ -181,8 +235,19 @@ impl Cli {
                         caller: caller_query,
                         callee: callee_query,
                     },
+                    false,
+                    false,
                 )
             }
+        };
+
+        let render_options = crate::render::RenderOptions {
+            format: common.format,
+            output_file: common.output,
+            verbose: common.verbose,
+            show_metrics: common.metrics,
+            no_unresolved,
+            no_foreign,
         };
 
         let current_dir = std::env::current_dir().map_err(|e| InputError::IoError {
@@ -201,6 +266,13 @@ impl Cli {
                 compile_commands_path,
             },
             request,
+            render_options,
         ))
+    }
+
+    /// 하위 호환성용 기존 메서드
+    pub fn into_request(self) -> Result<(ProjectInput, QueryRequest), InputError> {
+        let (input, req, _) = self.into_execution_plan()?;
+        Ok((input, req))
     }
 }

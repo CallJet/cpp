@@ -99,3 +99,32 @@ fn test_cli_invalid_command() {
     let result = Cli::try_parse_from(["calljet", "unknown_cmd"]);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_cli_rich_options_parsing() {
+    let cli = Cli::try_parse_from([
+        "calljet",
+        "callers",
+        "target_fn",
+        "--format",
+        "json",
+        "--output",
+        "output.json",
+        "--metrics",
+        "--verbose",
+        "--no-unresolved",
+        "--no-foreign",
+    ])
+    .unwrap();
+
+    let (_, _, render_opts) = cli.into_execution_plan().unwrap();
+    assert_eq!(render_opts.format, calljet::cli::OutputFormat::Json);
+    assert_eq!(
+        render_opts.output_file,
+        Some(std::path::PathBuf::from("output.json"))
+    );
+    assert!(render_opts.show_metrics);
+    assert!(render_opts.verbose);
+    assert!(render_opts.no_unresolved);
+    assert!(render_opts.no_foreign);
+}
