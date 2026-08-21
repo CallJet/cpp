@@ -11,12 +11,12 @@ use crate::diagnostic::{
 use crate::discovery::DiscoveryIndex;
 use crate::model::{
     BackendSymbolId, CallEdge, CallEdgeId, CallKind, CallPath, CandidateCallId, CandidateCallKind,
-    CandidateSymbol, CandidateSymbolKind, CompilationKey, Completion, Confidence, QueryMetrics,
-    QueryRequest, QueryResult, ResultCounts, Symbol, SymbolId, SymbolQuery, VerificationEvidence,
-    VerificationReason, VerifiedEdgeKey,
+    CandidateSymbol, CandidateSymbolId, CandidateSymbolKind, CompilationKey, Completion,
+    Confidence, QueryMetrics, QueryRequest, QueryResult, ResultCounts, Symbol, SymbolId,
+    SymbolQuery, VerificationEvidence, VerificationReason, VerifiedEdgeKey,
 };
 use crate::project::ProjectContext;
-use crate::semantic::{SemanticProvider, VerificationBatch};
+use crate::semantic::{SemanticProvider, VerificationBatch, VerificationResult};
 
 macro_rules! progress_log {
     ($enabled:expr, $($arg:tt)*) => {
@@ -41,6 +41,15 @@ pub struct TraversalState {
     pub best_depth: HashMap<SymbolId, usize>,
     pub predecessors: HashMap<SymbolId, (SymbolId, CallEdgeId)>,
     pub edges: BTreeMap<VerifiedEdgeKey, CallEdge>,
+}
+
+/// 한 쿼리 안에서 동일한 시맨틱 검증 요청을 재사용하기 위한 안정적 키.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct VerificationBatchCacheKey {
+    context: CompilationKey,
+    symbols: Vec<CandidateSymbolId>,
+    calls: Vec<CandidateCallId>,
+    discovery_symbol_count: Option<usize>,
 }
 
 /// 온디맨드 쿼리 엔진 (Query Engine)
@@ -68,10 +77,61 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         }
     }
 
-    /// 쿼리, 순회 및 discovery 진행 로그 출력 여부를 설정한다.
+    /// 쿼리, 순회 및 discovery 진행 로그 상세도를 설정한다.
+    pub fn set_progress_verbosity(&mut self, verbosity: u8) {
+        self.progress = verbosity > 0;
+        self.discovery.set_verbosity(verbosity);
+    }
+
+    /// 기존 호출자를 위한 집계 진행 로그 토글.
     pub fn set_progress(&mut self, enabled: bool) {
-        self.progress = enabled;
-        self.discovery.set_progress(enabled);
+        self.set_progress_verbosity(u8::from(enabled));
+    }
+
+    /// 동일 컨텍스트·대상·호출 후보 묶음은 공급자를 다시 호출하지 않고 재사용한다.
+    fn verify_calls_cached(
+        &mut self,
+        cache: &mut BTreeMap<VerificationBatchCacheKey, VerificationResult>,
+        mut batch: VerificationBatch,
+        progress_scope: &str,
+        verified_batches: &mut usize,
+        attempted_tu_keys: &mut BTreeSet<CompilationKey>,
+    ) -> VerificationResult {
+        batch.symbols.sort();
+        batch.symbols.dedup();
+        batch.calls.sort();
+        batch.calls.dedup();
+
+        let key = VerificationBatchCacheKey {
+            context: batch.context.clone(),
+            symbols: batch.symbols.clone(),
+            calls: batch.calls.clone(),
+            discovery_symbol_count: batch
+                .symbols
+                .is_empty()
+                .then_some(self.discovery.symbols.len()),
+        };
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+
+        *verified_batches += 1;
+        attempted_tu_keys.insert(batch.context.clone());
+        if *verified_batches == 1 || *verified_batches % 25 == 0 {
+            progress_log!(
+                self.progress,
+                "[CallJet] traversal/{progress_scope}: semantic batch {}, unique TU {}, {} call candidate(s)",
+                *verified_batches,
+                attempted_tu_keys.len(),
+                batch.calls.len()
+            );
+        }
+
+        let result = self
+            .provider
+            .verify_calls(self.project, &self.discovery, batch);
+        cache.insert(key, result.clone());
+        result
     }
 
     /// 쿼리 요청 실행
@@ -430,6 +490,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(target_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut attempted_tu_keys = BTreeSet::new();
+        let mut verification_cache = BTreeMap::new();
         let mut reported_depth = None;
         let mut processed_nodes = 0usize;
         let mut verified_batches = 0usize;
@@ -489,22 +551,18 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             // 3. Clang 온디맨드 시맨틱 검증 수행
             let verify_start = Instant::now();
             for (ctx_key, calls) in batches {
-                verified_batches += 1;
-                if verified_batches == 1 || verified_batches % 25 == 0 {
-                    progress_log!(
-                        self.progress,
-                        "[CallJet] traversal/{query_name}: verifying TU batch {verified_batches} ({} call candidate(s))",
-                        calls.len()
-                    );
-                }
                 let batch = VerificationBatch {
                     context: ctx_key.clone(),
                     symbols: target_candidates.clone(),
                     calls: calls.clone(),
                 };
-                let ver_res =
-                    self.provider
-                        .verify_calls(self.project, &self.discovery, batch);
+                let ver_res = self.verify_calls_cached(
+                    &mut verification_cache,
+                    batch,
+                    query_name,
+                    &mut verified_batches,
+                    &mut attempted_tu_keys,
+                );
                 let context_checked = ver_res.context_checked;
                 self.record_analysis_issues(ver_res.issues);
                 if context_checked {
@@ -639,7 +697,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
         progress_log!(
             self.progress,
-            "[CallJet] traversal/{query_name}: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s), {} path(s)",
+            "[CallJet] traversal/{query_name}: complete — processed {processed_nodes} node(s), {verified_batches} semantic batch(es), {} unique TU(s), {} edge(s), {} path(s)",
+            attempted_tu_keys.len(),
             edges_vec.len(),
             paths.len()
         );
@@ -689,6 +748,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(source_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut attempted_tu_keys = BTreeSet::new();
+        let mut verification_cache = BTreeMap::new();
         let mut reported_depth = None;
         let mut processed_nodes = 0usize;
         let mut verified_batches = 0usize;
@@ -753,22 +814,18 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             // 3. Clang 검증
             let verify_start = Instant::now();
             for (ctx_key, calls) in batches {
-                verified_batches += 1;
-                if verified_batches == 1 || verified_batches % 25 == 0 {
-                    progress_log!(
-                        self.progress,
-                        "[CallJet] traversal/callees: verifying TU batch {verified_batches} ({} call candidate(s))",
-                        calls.len()
-                    );
-                }
                 let batch = VerificationBatch {
                     context: ctx_key.clone(),
                     symbols: Vec::new(),
                     calls: calls.clone(),
                 };
-                let ver_res =
-                    self.provider
-                        .verify_calls(self.project, &self.discovery, batch);
+                let ver_res = self.verify_calls_cached(
+                    &mut verification_cache,
+                    batch,
+                    "callees",
+                    &mut verified_batches,
+                    &mut attempted_tu_keys,
+                );
                 let context_checked = ver_res.context_checked;
                 self.record_analysis_issues(ver_res.issues);
                 if context_checked {
@@ -890,7 +947,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
         progress_log!(
             self.progress,
-            "[CallJet] traversal/callees: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+            "[CallJet] traversal/callees: complete — processed {processed_nodes} node(s), {verified_batches} semantic batch(es), {} unique TU(s), {} edge(s)",
+            attempted_tu_keys.len(),
             edges_vec.len()
         );
 
@@ -967,6 +1025,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(source_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut attempted_tu_keys = BTreeSet::new();
+        let mut verification_cache = BTreeMap::new();
         let mut reported_depth = None;
         let mut processed_nodes = 0usize;
         let mut verified_batches = 0usize;
@@ -1030,22 +1090,18 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             }
 
             for (ctx_key, calls) in batches {
-                verified_batches += 1;
-                if verified_batches == 1 || verified_batches % 25 == 0 {
-                    progress_log!(
-                        self.progress,
-                        "[CallJet] traversal/path: verifying TU batch {verified_batches} ({} call candidate(s))",
-                        calls.len()
-                    );
-                }
                 let batch = VerificationBatch {
                     context: ctx_key.clone(),
                     symbols: target_candidates.clone(),
                     calls: calls.clone(),
                 };
-                let ver_res =
-                    self.provider
-                        .verify_calls(self.project, &self.discovery, batch);
+                let ver_res = self.verify_calls_cached(
+                    &mut verification_cache,
+                    batch,
+                    "path",
+                    &mut verified_batches,
+                    &mut attempted_tu_keys,
+                );
                 let context_checked = ver_res.context_checked;
                 self.record_analysis_issues(ver_res.issues);
                 if context_checked {
@@ -1193,7 +1249,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let counts = calculate_counts(&symbols_map, &edges_vec, std::slice::from_ref(&path));
             progress_log!(
                 self.progress,
-                "[CallJet] traversal/path: found — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} hop(s)",
+                "[CallJet] traversal/path: found — processed {processed_nodes} node(s), {verified_batches} semantic batch(es), {} unique TU(s), {} hop(s)",
+                attempted_tu_keys.len(),
                 path.edges.len()
             );
 
@@ -1210,7 +1267,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
             progress_log!(
                 self.progress,
-                "[CallJet] traversal/path: truncated — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+                "[CallJet] traversal/path: truncated — processed {processed_nodes} node(s), {verified_batches} semantic batch(es), {} unique TU(s), {} edge(s)",
+                attempted_tu_keys.len(),
                 edges_vec.len()
             );
             Ok(QueryResult {
@@ -1228,7 +1286,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
             progress_log!(
                 self.progress,
-                "[CallJet] traversal/path: no path — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+                "[CallJet] traversal/path: no path — processed {processed_nodes} node(s), {verified_batches} semantic batch(es), {} unique TU(s), {} edge(s)",
+                attempted_tu_keys.len(),
                 edges_vec.len()
             );
             Ok(QueryResult {

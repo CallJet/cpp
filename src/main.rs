@@ -22,15 +22,18 @@ fn main() {
             process::exit(1);
         }
     };
-    let progress = render_options.verbosity > 0;
+    let progress = render_options.progress;
+    let detailed_progress = progress && render_options.verbosity >= 2;
 
     if progress {
         eprint!("{CALLJET_ASCII_ART}");
-        eprintln!("[CallJet] source root: {}", input.source_root.display());
-        eprintln!(
-            "[CallJet] compilation database: {}",
-            input.compile_commands_path.display()
-        );
+        if detailed_progress {
+            eprintln!("[CallJet] source root: {}", input.source_root.display());
+            eprintln!(
+                "[CallJet] compilation database: {}",
+                input.compile_commands_path.display()
+            );
+        }
         eprintln!("[CallJet] loading project...");
     }
 
@@ -56,7 +59,14 @@ fn main() {
 
     let provider = ClangProvider::new();
     let mut engine = QueryEngine::new(&project, provider);
-    engine.set_progress(progress);
+    let progress_verbosity = if progress && render_options.verbosity >= 2 {
+        2
+    } else if progress {
+        1
+    } else {
+        0
+    };
+    engine.set_progress_verbosity(progress_verbosity);
 
     if progress {
         eprintln!("[CallJet] executing query...");

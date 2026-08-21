@@ -305,6 +305,12 @@ found, the complete candidate remains `POSSIBLE` (or `UNRESOLVED` when no
 callee identity is available) with a missing-build-context issue; it is not
 confirmed using guessed flags.
 
+Identifier co-occurrence is not an include relationship. Discovery must not
+attach the union of compilation contexts from every source that contains the
+same spelling to a header or symbol. If direct source ownership and recorded
+include parents are both absent, semantic context is unknown and the
+Tree-sitter fallback is retained.
+
 This include association is a candidate narrowing mechanism, not semantic
 proof. It may scan include directives broadly but may not trigger Clang parsing
 of a TU with no candidate relationship to the active query.
@@ -952,7 +958,7 @@ The initial cache is deliberately process-local and query-scoped:
 | Discovery index | Project context | Query session | Reuse candidate lookup across frontier steps. |
 | Parsed Clang TU or parse failure | `CompilationKey` | Query session | Enforce one parse attempt per TU context. |
 | Canonical symbol resolution | Candidate plus `CompilationKey` | Query session | Avoid repeated cursor-to-symbol conversion. |
-| Verified edge result | Candidate call plus `CompilationKey` | Query session | Avoid repeated semantic verification. |
+| Verification batch result | `CompilationKey`, sorted target/call candidates, plus discovery revision for an implicit target set | Query session | Avoid replaying an identical semantic verification request. |
 
 No persistent cache or database is created in the PoC. Process exit releases
 all cached source-derived state. Every new CLI invocation rereads source and

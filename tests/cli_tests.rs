@@ -165,6 +165,7 @@ fn test_cli_verbosity_count_and_long_option_compatibility() {
     let short = Cli::try_parse_from(["calljet", "callers", "target_fn", "-v"]).unwrap();
     let (_, _, short_options) = short.into_execution_plan().unwrap();
     assert_eq!(short_options.verbosity, 1);
+    assert!(!short_options.progress);
 
     let repeated = Cli::try_parse_from(["calljet", "callers", "target_fn", "-vv"]).unwrap();
     let (_, _, repeated_options) = repeated.into_execution_plan().unwrap();
@@ -174,6 +175,21 @@ fn test_cli_verbosity_count_and_long_option_compatibility() {
         Cli::try_parse_from(["calljet", "callers", "target_fn", "--verbose"]).unwrap();
     let (_, _, long_options) = long.into_execution_plan().unwrap();
     assert_eq!(long_options.verbosity, 1);
+}
+
+#[test]
+fn test_cli_progress_does_not_enable_verbose_result_output() {
+    let cli = Cli::try_parse_from([
+        "calljet",
+        "trace",
+        "target_fn",
+        "--progress",
+    ])
+    .unwrap();
+    let (_, _, options) = cli.into_execution_plan().unwrap();
+
+    assert!(options.progress);
+    assert_eq!(options.verbosity, 0);
 }
 
 #[test]
@@ -216,4 +232,29 @@ fn test_missing_compile_commands_uses_quiet_treesitter_fallback() {
         "root_fn\nmid\nleaf\n"
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_progress_keeps_compact_output_and_hides_project_paths() {
+    let root = tempdir().unwrap();
+    std::fs::write(
+        root.path().join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_calljet"))
+        .args(["trace", "leaf", "--progress", "--root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "root_fn\nmid\nleaf\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("[CallJet]"));
+    assert!(!stderr.contains(&root.path().display().to_string()));
+    assert!(!stderr.contains(r"\\?\"));
 }

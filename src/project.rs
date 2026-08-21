@@ -75,10 +75,13 @@ impl ProjectContext {
 
     /// 파일 경로를 사용자 표시용 상대 경로로 변환
     pub fn display_path(&self, path: &Path) -> PathBuf {
-        if let Ok(rel) = path.strip_prefix(&self.source_root) {
+        let normalized = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Ok(rel) = normalized.strip_prefix(&self.source_root) {
+            rel.to_path_buf()
+        } else if let Ok(rel) = path.strip_prefix(&self.display_root) {
             rel.to_path_buf()
         } else {
-            path.to_path_buf()
+            strip_windows_verbatim_prefix(normalized)
         }
     }
 
@@ -141,6 +144,22 @@ impl ProjectContext {
 
         files.into_iter().collect()
     }
+}
+
+/// Windows `canonicalize`가 붙이는 `\\?\` 접두사를 사용자 출력에서 제거한다.
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let display = path.to_string_lossy();
+        if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = display.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path
 }
 
 /// 후보 탐색 가치가 없고 파일 수가 매우 큰 도구/빌드 캐시 디렉토리인지 확인
