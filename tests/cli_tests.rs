@@ -1,9 +1,13 @@
 //! CLI 인자 파싱 및 명령 구성 단위 테스트
 //! Unit tests for CLI argument parsing and command construction
 
+use std::process::Command;
+
 use calljet::cli::{Cli, Commands};
+use calljet::console::{missing_compilation_database_help, CALLJET_ASCII_ART};
 use calljet::model::QueryRequest;
 use clap::Parser;
+use tempfile::tempdir;
 
 #[test]
 fn test_cli_callers_parsing() {
@@ -127,4 +131,41 @@ fn test_cli_rich_options_parsing() {
     assert!(render_opts.verbose);
     assert!(render_opts.no_unresolved);
     assert!(render_opts.no_foreign);
+}
+
+#[test]
+fn test_calljet_ascii_art_matches_aircraft_call_path_logo() {
+    assert!(CALLJET_ASCII_ART.contains(">---o"));
+    assert!(CALLJET_ASCII_ART.matches('o').count() >= 3);
+    assert!(CALLJET_ASCII_ART.contains("CallJet C++"));
+    assert!(CALLJET_ASCII_ART.contains("FIND THE PATH. SKIP THE WHOLE GRAPH."));
+}
+
+#[test]
+fn test_missing_compilation_database_help_is_actionable() {
+    let path = std::path::Path::new("project/compile_commands.json");
+    let help = missing_compilation_database_help(path);
+
+    assert!(help.contains("project/compile_commands.json"));
+    assert!(help.contains("analysis stopped before source parsing"));
+    assert!(help.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
+    assert!(help.contains("--compile-commands build/compile_commands.json"));
+}
+
+#[test]
+fn test_missing_compile_commands_prints_banner_logs_and_help() {
+    let root = tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_calljet"))
+        .args(["callers", "target", "--root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("CallJet C++"));
+    assert!(stderr.contains("[CallJet] loading project..."));
+    assert!(stderr.contains("compilation database not found"));
+    assert!(stderr.contains("analysis stopped before source parsing"));
+    assert!(stderr.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
 }

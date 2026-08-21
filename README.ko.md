@@ -29,6 +29,8 @@
   * **macOS**: `brew install llvm`
 * **Compilation Database**: 프로젝트의 `compile_commands.json`
   * CMake 사용 시: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+  * 파일이 없으면 소스 파싱 전에 중단하고 CMake 생성 명령과
+    `--compile-commands` 사용 예시를 출력합니다.
 
 ---
 
