@@ -448,6 +448,43 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             .collect()
     }
 
+    /// Clang이 대상 참조를 못 찾았지만 Tree-sitter가 완전한
+    /// direct/qualified/member 호출로 분류한 경우 구문 경로를 복구한다.
+    fn recover_unresolved_reverse_edge(
+        &mut self,
+        calls: &[CandidateCallId],
+        unresolved_edge: &CallEdge,
+        caller: &Symbol,
+        target: &Symbol,
+    ) -> Option<CallEdge> {
+        let call_id = calls.iter().copied().find(|call_id| {
+            self.discovery
+                .calls
+                .get(call_id)
+                .is_some_and(|call| {
+                    call.expression == unresolved_edge.callsite
+                        && call.syntax_complete
+                        && !matches!(call.syntax_hint, CandidateCallKind::Other)
+                        && call_may_target_symbol(call, target)
+                })
+        })?;
+
+        let (mut recovered, _, _) = self
+            .fallback_edges_for_call(call_id, Some(caller), Some(target))
+            .into_iter()
+            .next()?;
+
+        // Clang이 해석한 TU/context 정보는 버리지 않고, 대상만
+        // Tree-sitter 구문 근거로 보완한다.
+        recovered
+            .contexts
+            .extend(unresolved_edge.contexts.iter().cloned());
+        recovered
+            .evidence_by_context
+            .extend(unresolved_edge.evidence_by_context.clone());
+        Some(recovered)
+    }
+
     fn allocate_fallback_edge_id(&mut self) -> CallEdgeId {
         let id = CallEdgeId(self.next_fallback_edge_id);
         self.next_fallback_edge_id = self.next_fallback_edge_id.saturating_sub(1);
@@ -574,7 +611,28 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
-                for mut edge in ver_res.edges {
+                let mut edges_to_consider = Vec::new();
+                for edge in ver_res.edges {
+                    let targetless_unresolved = edge.callee.is_none()
+                        && edge.confidence == Confidence::Unresolved;
+                    if !verified_only && targetless_unresolved {
+                        let caller = symbols_map.get(&edge.caller).cloned();
+                        if let Some(recovered) = caller.as_ref().and_then(|caller| {
+                            self.recover_unresolved_reverse_edge(
+                                &calls,
+                                &edge,
+                                caller,
+                                &cur_sym,
+                            )
+                        }) {
+                            edges_to_consider.push(recovered);
+                            continue;
+                        }
+                    }
+                    edges_to_consider.push(edge);
+                }
+
+                for mut edge in edges_to_consider {
                     // verified_only 필터링
                     if verified_only && edge.confidence != Confidence::Confirmed {
                         continue;
@@ -584,10 +642,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     let targets_current = edge_targets_symbol(&edge, &cur_sym, &symbols_map);
                     let unresolved_candidate = edge.callee.is_none()
                         && edge.confidence == Confidence::Unresolved;
-                    // 대상 ID가 없는 unresolved 결과는 callers의 1-hop 구문
-                    // 근거로만 유지한다. 현재 피호출자와 연결된 엣지가
-                    // 아니므로 trace에 포함하거나 역방향 프론티어를 늘리면
-                    // 관계없는 caller까지 연쇄적으로 확장된다.
+                    // 복구되지 않은 targetless unresolved 결과는 callers의
+                    // 1-hop 근거로만 유지한다. 현재 피호출자와 연결할 구문
+                    // 근거도 없으므로 trace나 역방향 프론티어에는 넣지 않는다.
                     let matches_callee =
                         targets_current || (!trace_mode && unresolved_candidate);
 

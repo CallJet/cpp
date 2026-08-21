@@ -213,6 +213,23 @@ impl SemanticProvider for TargetlessUnresolvedProvider {
                 result.symbols.push(caller.clone());
             }
 
+            let mut evidence_by_context = BTreeMap::new();
+            evidence_by_context.insert(
+                batch.context.clone(),
+                VerificationEvidence {
+                    expression_text: call.expression_text.clone(),
+                    static_target: None,
+                    candidate_targets: Vec::new(),
+                    clang_diagnostics: Vec::new(),
+                    reason: VerificationReason::CursorNotFound,
+                    spelling_location: call.callee_location.clone(),
+                    expansion_location: Some(call.expression.start.clone()),
+                    is_virtual: false,
+                    is_template_related: false,
+                    is_macro_expanded: false,
+                },
+            );
+
             self.next_edge_id = self.next_edge_id.saturating_add(1);
             result.edges.push(CallEdge {
                 id: CallEdgeId(self.next_edge_id),
@@ -222,7 +239,7 @@ impl SemanticProvider for TargetlessUnresolvedProvider {
                 kind: CallKind::Unresolved,
                 confidence: Confidence::Unresolved,
                 contexts: BTreeSet::from([batch.context.clone()]),
-                evidence_by_context: BTreeMap::new(),
+                evidence_by_context,
             });
         }
 
@@ -759,7 +776,7 @@ fn test_treesitter_fallback_survives_unavailable_semantic_provider() {
 }
 
 #[test]
-fn test_targetless_unresolved_edges_do_not_expand_reverse_traversal() {
+fn test_targetless_direct_calls_recover_treesitter_reverse_paths() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     fs::write(
@@ -792,9 +809,41 @@ fn test_targetless_unresolved_edges_do_not_expand_reverse_traversal() {
             verified_only: false,
         })
         .unwrap();
-    assert_eq!(callers_engine.provider.verify_calls, 1);
-    assert_eq!(callers.edges.len(), 1);
-    assert!(callers.edges[0].callee.is_none());
+    assert_eq!(callers_engine.provider.verify_calls, 2);
+    assert_eq!(callers.edges.len(), 2);
+    assert!(callers.edges.iter().all(|edge| {
+        edge.callee.is_some()
+            && edge.kind == CallKind::Direct
+            && edge.confidence == Confidence::Possible
+    }));
+    assert!(callers.edges.iter().all(|edge| {
+        let reasons = edge
+            .evidence_by_context
+            .values()
+            .map(|evidence| evidence.reason)
+            .collect::<BTreeSet<_>>();
+        reasons.contains(&VerificationReason::SyntacticCandidate)
+            && reasons.contains(&VerificationReason::CursorNotFound)
+    }));
+    let caller_path = callers.paths[0]
+        .nodes
+        .iter()
+        .map(|id| callers.symbols.get(id).unwrap().display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(caller_path, vec!["root_fn", "mid", "leaf"]);
+
+    let mut verified_only_engine =
+        QueryEngine::new(&project, TargetlessUnresolvedProvider::default());
+    let verified_only = verified_only_engine
+        .execute(QueryRequest::Callers {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: true,
+        })
+        .unwrap();
+    assert_eq!(verified_only.completion, Completion::NoResult);
+    assert!(verified_only.edges.is_empty());
+    assert!(verified_only.paths.is_empty());
 
     let mut trace_engine = QueryEngine::new(&project, TargetlessUnresolvedProvider::default());
     let trace = trace_engine
@@ -804,10 +853,15 @@ fn test_targetless_unresolved_edges_do_not_expand_reverse_traversal() {
             verified_only: false,
         })
         .unwrap();
-    assert_eq!(trace_engine.provider.verify_calls, 1);
-    assert_eq!(trace.completion, Completion::NoResult);
-    assert!(trace.edges.is_empty());
-    assert!(trace.paths.is_empty());
+    assert_eq!(trace_engine.provider.verify_calls, 2);
+    assert_eq!(trace.completion, Completion::Complete);
+    assert_eq!(trace.edges.len(), 2);
+    let trace_path = trace.paths[0]
+        .nodes
+        .iter()
+        .map(|id| trace.symbols.get(id).unwrap().display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(trace_path, vec!["root_fn", "mid", "leaf"]);
 }
 
 #[test]

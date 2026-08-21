@@ -10,9 +10,9 @@ use clang_sys::*;
 
 use crate::diagnostic::{AnalysisCause, AnalysisIssue, Severity};
 use crate::model::{
-    BackendSymbolId, CallEdge, CallEdgeId, CallKind, CandidateSymbolId, CompilationContext,
-    CompilationKey, Confidence, Language, LineColumn, SourceLocation, Symbol, SymbolId,
-    VerificationEvidence, VerificationReason,
+    BackendSymbolId, CallEdge, CallEdgeId, CallKind, CandidateCallKind, CandidateSymbolId,
+    CompilationContext, CompilationKey, Confidence, Language, LineColumn, SourceLocation, Symbol,
+    SymbolId, VerificationEvidence, VerificationReason,
 };
 use crate::project::ProjectContext;
 use crate::semantic::{ResolutionBatch, SemanticProvider, VerificationBatch, VerificationResult};
@@ -718,12 +718,18 @@ impl ClangProvider {
                     )
                 }
             } else {
-                // 대상을 확정할 수 없는 경우 (함수 포인터 등)
+                // 일반 호출의 참조 커서를 못 찾은 경우와 함수 포인터처럼
+                // 구문상 대상 자체가 불명인 경우를 같은 원인으로 취급하지 않는다.
+                let reason = if matches!(call_site.syntax_hint, CandidateCallKind::Other) {
+                    VerificationReason::IndirectTargetUnknown
+                } else {
+                    VerificationReason::CursorNotFound
+                };
                 (
                     None,
                     CallKind::Unresolved,
                     Confidence::Unresolved,
-                    VerificationReason::IndirectTargetUnknown,
+                    reason,
                 )
             };
 

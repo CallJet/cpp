@@ -680,6 +680,10 @@ Tree-sitter candidates. The query engine creates a syntactic fallback edge with
 `CONFIRMED` confidence. A successfully checked context may still reject an
 inactive or semantically mismatched candidate.
 
+Failure to obtain a referenced cursor for a syntactically direct, qualified,
+or member call is recorded as `CursorNotFound`; `IndirectTargetUnknown` is
+reserved for `Other` call syntax whose target identity is itself unavailable.
+
 Different call sites remain separate edges. Equivalent edges from different
 compilation contexts merge only when caller, callee, call site, kind, and
 confidence match; their context-specific evidence remains separate. For a
@@ -851,9 +855,11 @@ For `callers(target)`:
 7. Edges whose callee equals the frontier symbol, or whose possible target set
    contains it, are recorded. Their callers enter the next frontier unless
    already expanded at an equal or shallower depth.
-8. A targetless unresolved call site may be retained as one-hop `callers`
-   evidence, but it never enters the reverse frontier. `trace` excludes it
-   because no connected caller-to-callee path can be established.
+8. If Clang cannot identify a target but Tree-sitter produced a complete
+   direct, qualified, or member-call candidate matching the current target,
+   retain it as a possible syntactic edge and continue the reverse frontier.
+   Genuinely indirect `Other` calls remain targetless unresolved evidence and
+   never enter a path.
 9. Both `callers` and `trace` return reconstructed top-level-caller-to-target
    paths. Compact text consumes those paths directly instead of inferring an
    order from the deduplicated edge set.
