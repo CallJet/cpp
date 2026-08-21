@@ -75,6 +75,10 @@ pub struct CommonOptions {
         global = true
     )]
     pub verbose: u8,
+
+    /// 분석 진행 상황만 표시하고 결과 형식은 변경하지 않음
+    #[arg(long = "progress", default_value_t = false, global = true)]
+    pub progress: bool,
 }
 
 /// 탐색 제어 옵션 (Traversal Options)
@@ -280,6 +284,7 @@ impl Cli {
             format: common.format,
             output_file: common.output,
             verbosity: common.verbose,
+            progress: common.progress,
             show_metrics: common.metrics,
             no_unresolved,
             no_foreign,

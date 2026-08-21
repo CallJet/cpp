@@ -140,6 +140,7 @@ calljet explain process_event dispatch
 | `--no-unresolved` | - | `false` | Exclude `[UNRESOLVED]` indirect edges from results |
 | `--no-foreign` | - | `false` | Exclude foreign external library boundary calls |
 | `--metrics` | - | `false` | Output detailed timing and performance metrics |
+| `--progress` | - | `false` | Show aggregate discovery/traversal progress without changing result detail or printing project paths |
 | `--verbose` | `-v` | `0` | Increase text detail (`-v`: symbol hierarchy/callsite, `-vv`: evidence, contexts, TU report, and metrics) |
 | `--help` | `-h` | - | Display help information |
 
@@ -160,7 +161,7 @@ c_mid
 c_leaf
 ```
 
-Successful default text output prints only qualified function symbols, such as `namespace::class::function`, one per line. It omits the banner, progress logs, file paths, labels, arrows, confidence, and callsites. Use `-v` to enable progress logs and include `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, and callsites. Use `-vv` to additionally include semantic evidence, contexts, Translation Unit details, and performance metrics. The long-form `--verbose` remains equivalent to `-v`.
+Successful default text output prints only qualified function symbols, such as `namespace::class::function`, one per line. It omits the banner, progress logs, file paths, labels, arrows, confidence, and callsites. Use `--progress` to add aggregate progress while keeping that compact result and hiding project/file paths. Use `-v` for `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, and callsites; use `-vv` for semantic evidence, contexts, Translation Unit details, and performance metrics. Progress and result verbosity are independent.
 
 ---
 
