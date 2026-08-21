@@ -356,3 +356,55 @@ fn test_query_discovery_parses_only_text_prefilter_matches() {
     assert_eq!(index.source_files[0], fs::canonicalize(target_file).unwrap());
     assert_eq!(index.matching_symbols(&query).len(), 1);
 }
+
+#[test]
+fn test_header_call_does_not_borrow_context_from_unrelated_spelling_match() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let header = root.join("orphan.hpp");
+    let unrelated = root.join("unrelated.cpp");
+
+    fs::write(
+        &header,
+        "inline void target() {} inline void header_caller() { target(); }",
+    )
+    .unwrap();
+    fs::write(
+        &unrelated,
+        "void target(); void unrelated_caller() { target(); }",
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "unrelated.cpp",
+            "command": "clang++ -c unrelated.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    let canonical_header = fs::canonicalize(header).unwrap();
+    let mut index = DiscoveryIndex::default();
+    index.discover_query(&project, &SymbolQuery::parse("target"));
+
+    let header_call_id = index
+        .calls
+        .iter()
+        .find(|(_, call)| call.expression.start.file == canonical_header)
+        .map(|(id, _)| *id)
+        .expect("헤더 내부 target 호출 후보가 있어야 함");
+
+    assert!(
+        index.contexts_for(header_call_id, &project).is_empty(),
+        "같은 철자가 무관한 소스에 있다는 이유로 해당 TU를 헤더에 연결하면 안 됨"
+    );
+}

@@ -106,6 +106,8 @@ it destroys the expected performance advantage of syntactic discovery.
 
 Headers do not independently define reliable compilation context. A candidate
 in a header must be verified through a translation unit that includes it.
+An unrelated source file is never associated merely because it contains the
+same identifier spelling.
 When no such context can be parsed, complete Tree-sitter candidates remain in
 default traversal as `POSSIBLE`; `--verified-only` excludes them.
 

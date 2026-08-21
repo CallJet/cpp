@@ -46,16 +46,12 @@ pub struct DiscoveryIndex {
     pub file_includes: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
     /// 헤더 포함 관계 (Header -> Parent Source Files)
     pub include_parents: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
-    /// 이름 검색에서 함께 발견된 직접 컴파일 가능한 컨텍스트
-    search_contexts_by_name: BTreeMap<String, Vec<CompilationKey>>,
-    /// 텍스트 검색에서 같은 후보군으로 묶인 헤더/소스별 컴파일 컨텍스트
-    search_contexts_by_file: BTreeMap<PathBuf, Vec<CompilationKey>>,
     /// 아직 AST를 만들지 않은 프로젝트 내 C/C++ 파일 카탈로그
     candidate_files: Option<Vec<PathBuf>>,
     /// 이미 텍스트 prefilter를 끝낸 단말 이름
     searched_names: BTreeSet<String>,
-    /// 진행 로그 출력 여부
-    progress: bool,
+    /// 진행 로그 상세도 (0: 없음, 1: 집계만, 2+: 파일 경로 포함)
+    verbosity: u8,
 }
 
 impl DiscoveryIndex {
@@ -77,9 +73,14 @@ impl DiscoveryIndex {
         index
     }
 
-    /// 이름 검색 및 Tree-sitter 진행 로그 출력 여부를 설정한다.
+    /// 이름 검색 및 Tree-sitter 진행 로그 상세도를 설정한다.
+    pub fn set_verbosity(&mut self, verbosity: u8) {
+        self.verbosity = verbosity;
+    }
+
+    /// 기존 호출자를 위한 집계 진행 로그 토글.
     pub fn set_progress(&mut self, enabled: bool) {
-        self.progress = enabled;
+        self.set_verbosity(u8::from(enabled));
     }
 
     /// 심볼 쿼리에 필요한 파일만 텍스트로 좁힌 뒤 Tree-sitter로 지연 파싱한다.
@@ -96,12 +97,12 @@ impl DiscoveryIndex {
 
         let started = Instant::now();
         if self.candidate_files.is_none() {
-            if self.progress {
+            if self.verbosity > 0 {
                 eprintln!("[CallJet] discovery: collecting C/C++ file paths...");
             }
             let scan_started = Instant::now();
             let files = project.source_files();
-            if self.progress {
+            if self.verbosity > 0 {
                 eprintln!(
                     "[CallJet] discovery: {} candidate file path(s) in {:?}",
                     files.len(),
@@ -116,7 +117,7 @@ impl DiscoveryIndex {
         let progress_step = (total_files / 10).max(1);
         let mut matches = Vec::new();
 
-        if self.progress {
+        if self.verbosity > 0 {
             eprintln!(
                 "[CallJet] discovery: text prefilter '{}' across {} file(s)...",
                 spelling, total_files
@@ -124,7 +125,9 @@ impl DiscoveryIndex {
         }
         for (index, file) in files.iter().enumerate() {
             let processed = index + 1;
-            if self.progress && (processed == total_files || processed % progress_step == 0) {
+            if self.verbosity > 0
+                && (processed == total_files || processed % progress_step == 0)
+            {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
                 eprintln!(
                     "[CallJet] discovery: text prefilter {processed}/{total_files} ({percent}%)"
@@ -137,28 +140,6 @@ impl DiscoveryIndex {
         }
         self.source_files_inspected = self.source_files_inspected.saturating_add(total_files);
 
-        let mut context_keys = Vec::new();
-        for file in &matches {
-            for context in project.compilation_db.contexts_for_source(file) {
-                if !context_keys.contains(&context.key) {
-                    context_keys.push(context.key.clone());
-                }
-            }
-        }
-        self.search_contexts_by_name
-            .insert(spelling.to_string(), context_keys.clone());
-        for file in &matches {
-            let file_contexts = self
-                .search_contexts_by_file
-                .entry(file.clone())
-                .or_default();
-            for key in &context_keys {
-                if !file_contexts.contains(key) {
-                    file_contexts.push(key.clone());
-                }
-            }
-        }
-
         let matched_count = matches.len();
         let parsed = self.source_files.iter().cloned().collect::<BTreeSet<_>>();
         let new_matches = matches
@@ -166,7 +147,7 @@ impl DiscoveryIndex {
             .filter(|file| !parsed.contains(file))
             .collect::<Vec<_>>();
 
-        if self.progress {
+        if self.verbosity > 0 {
             eprintln!(
                 "[CallJet] discovery: '{}' matched {} file(s); Tree-sitter parsing {} new file(s)",
                 spelling,
@@ -198,22 +179,28 @@ impl DiscoveryIndex {
 
         let total_files = new_files.len();
         let progress_step = (total_files / 10).max(1);
-        let progress = self.progress;
+        let verbosity = self.verbosity;
         let previous = std::mem::take(self);
         let mut indexer = IndexBuilder::with_index(project, previous);
 
         for (index, file) in new_files.iter().enumerate() {
             let processed = index + 1;
-            if progress
+            if verbosity > 0
                 && (processed == 1
                     || processed == total_files
                     || processed % progress_step == 0)
             {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
-                eprintln!(
-                    "[CallJet] discovery: Tree-sitter {processed}/{total_files} ({percent}%) — {}",
-                    project.display_path(file).display()
-                );
+                if verbosity > 1 {
+                    eprintln!(
+                        "[CallJet] discovery: Tree-sitter {processed}/{total_files} ({percent}%) — {}",
+                        project.display_path(file).display()
+                    );
+                } else {
+                    eprintln!(
+                        "[CallJet] discovery: Tree-sitter {processed}/{total_files} ({percent}%)"
+                    );
+                }
             }
             indexer.index_file(file);
         }
@@ -298,16 +285,10 @@ impl DiscoveryIndex {
             if !contexts.is_empty() {
                 return contexts;
             }
-
-            if let Some(caller) = self.symbols.get(&call.caller) {
-                return self
-                    .search_contexts_by_name
-                    .get(&caller.name)
-                    .cloned()
-                    .unwrap_or_default();
-            }
         }
 
+        // 같은 철자가 다른 소스에 등장했다는 이유만으로 그 TU를 연결하지 않는다.
+        // 실제 파일/include 관계를 모르면 상위 계층이 Tree-sitter fallback을 사용한다.
         Vec::new()
     }
 
@@ -326,10 +307,8 @@ impl DiscoveryIndex {
             return contexts;
         }
 
-        self.search_contexts_by_name
-            .get(&symbol.name)
-            .cloned()
-            .unwrap_or_default()
+        // 문법 후보의 이름만으로 무관한 compile_commands 엔트리를 추측하지 않는다.
+        Vec::new()
     }
 
     /// 소스 또는 헤더 파일을 사용할 수 있는 컴파일 컨텍스트 키 목록 조회
@@ -351,12 +330,6 @@ impl DiscoveryIndex {
                         }
                     }
                 }
-            }
-        }
-
-        if contexts.is_empty() {
-            if let Some(search_contexts) = self.search_contexts_by_file.get(file) {
-                contexts.extend(search_contexts.iter().cloned());
             }
         }
 

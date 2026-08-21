@@ -32,6 +32,8 @@ pub struct RenderOptions {
     pub output_file: Option<PathBuf>,
     /// 출력 상세도 (0: 정규화된 함수명만, 1: 심볼 구조, 2+: 근거/TU/성능)
     pub verbosity: u8,
+    /// 쿼리 진행 로그 출력 여부 (결과 상세도와 독립적)
+    pub progress: bool,
     /// 성능 메트릭 출력 여부
     pub show_metrics: bool,
     /// 미해결(UNRESOLVED) 엣지 숨기기
@@ -46,6 +48,7 @@ impl Default for RenderOptions {
             format: OutputFormat::Text,
             output_file: None,
             verbosity: 0,
+            progress: false,
             show_metrics: false,
             no_unresolved: false,
             no_foreign: false,

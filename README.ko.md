@@ -137,6 +137,7 @@ calljet explain process_event dispatch
 | `--no-unresolved` | - | `false` | `[UNRESOLVED]` 미해결 엣지를 결과에서 제외 |
 | `--no-foreign` | - | `false` | 외부 라이브러리 경계 호출을 결과에서 제외 |
 | `--metrics` | - | `false` | 소요 시간 및 메모리 등 성능 메트릭 상세 출력 |
+| `--progress` | - | `false` | 결과 상세도를 바꾸거나 프로젝트 경로를 표시하지 않고 탐색/순회 집계 진행률만 출력 |
 | `--verbose` | `-v` | `0` | 텍스트 상세도 증가 (`-v`: 심볼 계층/callsite, `-vv`: 근거·컨텍스트·TU·성능 지표) |
 | `--help` | `-h` | - | 도움말 출력 |
 
@@ -157,7 +158,7 @@ c_mid
 c_leaf
 ```
 
-성공한 기본 text 출력은 `namespace::class::function` 형태의 정규화된 함수 심볼만 한 줄씩 표시합니다. 배너, 진행 로그, 파일 경로, 라벨, 화살표, 신뢰도, callsite는 표시하지 않습니다. `-v`를 지정하면 진행 로그와 함께 `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, callsite를 표시합니다. `-vv`는 시맨틱 근거, 컨텍스트, 번역 단위(TU) 상세, 성능 지표까지 추가합니다. 기존 긴 옵션 `--verbose`는 `-v`와 같습니다.
+성공한 기본 text 출력은 `namespace::class::function` 형태의 정규화된 함수 심볼만 한 줄씩 표시합니다. 배너, 진행 로그, 파일 경로, 라벨, 화살표, 신뢰도, callsite는 표시하지 않습니다. `--progress`를 지정하면 compact 결과는 그대로 유지하면서 프로젝트·파일 경로 없이 집계 진행률만 추가합니다. `-v`는 `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, callsite를, `-vv`는 시맨틱 근거, 컨텍스트, 번역 단위(TU) 상세, 성능 지표까지 표시합니다. 진행률과 결과 상세도는 서로 독립적입니다.
 
 ---
 
