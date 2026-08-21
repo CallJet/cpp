@@ -26,10 +26,10 @@ It answers focused questions about callers, callees, paths between functions,
 and evidence for individual call edges without first requiring a complete
 project-wide semantic call graph.
 
-The initial product accepts a source root, a `compile_commands.json`
-compilation database, a target symbol, and, where applicable, a source symbol.
-It reports qualified symbols, call relationships, call paths, source
-locations, call classifications, confidence, and semantic evidence.
+The initial product accepts a source root, a target symbol, an optional
+`compile_commands.json` compilation database, and, where applicable, a source
+symbol. It reports qualified symbols, call relationships, call paths, source
+locations, call classifications, confidence, and available semantic evidence.
 
 ### 2.1 Initial scope
 
@@ -37,7 +37,7 @@ locations, call classifications, confidence, and semantic evidence.
 - Interface: command-line interface only.
 - Analysis: static analysis only.
 - Execution: local and offline.
-- Build context: a local `compile_commands.json`.
+- Build context: an optional local `compile_commands.json` for semantic verification.
 - Query model: focused, bounded, and on-demand.
 
 ### 2.2 Actors
@@ -46,7 +46,7 @@ locations, call classifications, confidence, and semantic evidence.
 | --- | --- |
 | Developer | Queries callers, callees, and paths while navigating or debugging a C/C++ codebase. |
 | Reviewer or maintainer | Inspects reachability and evidence behind reported call edges. |
-| Build system | Produces source and the compilation database consumed by CallJet. |
+| Build system | Produces source and, when semantic verification is desired, the compilation database consumed by CallJet. |
 | Local environment | Supplies local files, process execution, and temporary storage. |
 
 No remote service is an actor in the initial product.
@@ -56,7 +56,7 @@ No remote service is an actor in the initial product.
 ### 3.1 Assumptions
 
 - The user is authorized to read and analyze the supplied project.
-- The compilation database represents the build configuration of interest.
+- When supplied, the compilation database represents the build configuration of interest.
 - Required source, generated headers, dependencies, and compiler resources are
   locally accessible.
 - Static evidence cannot uniquely prove every runtime target of virtual calls,
@@ -70,7 +70,7 @@ No remote service is an actor in the initial product.
 | CON-001 | The initial product SHALL analyze only C and C++ source. |
 | CON-002 | The initial product SHALL expose analysis through a local CLI. |
 | CON-003 | The product SHALL perform static analysis and SHALL NOT require execution of the analyzed program. |
-| CON-004 | The product SHALL use the supplied `compile_commands.json` as semantic build context. |
+| CON-004 | The product SHALL use a supplied `compile_commands.json` as semantic build context, while its absence or invalidity SHALL NOT prevent syntactic discovery. |
 | CON-005 | The product SHALL separate candidate discovery from semantic verification so unverified candidates are not represented as proven edges. |
 | CON-006 | Semantic verification SHALL be limited to work relevant to the active query and SHALL NOT require a complete project-wide semantic call graph. |
 | CON-007 | Normal operation SHALL require no network connection or remote service. |
@@ -81,7 +81,7 @@ No remote service is an actor in the initial product.
 | Term | Definition |
 | --- | --- |
 | Source root | Local directory bounding project source supplied for analysis. |
-| Compilation database | Supplied `compile_commands.json` containing translation-unit build contexts. |
+| Compilation database | Optional supplied `compile_commands.json` containing translation-unit build contexts. |
 | Compilation context | One distinct build interpretation of a translation unit, including its working directory and semantic compiler arguments. |
 | Translation unit (TU) | A source file interpreted with one compilation command and its included content. |
 | Symbol query | User input intended to identify a function or method. |
@@ -121,11 +121,11 @@ column defines minimum test evidence.
 | ID | Requirement | Verification |
 | --- | --- | --- |
 | FR-006 | The CLI SHALL accept a local `compile_commands.json` as input. | Invoke with an explicitly supplied valid database. |
-| FR-007 | The product SHALL validate that the database exists, is readable, is syntactically valid, and contains usable TU entries before relying on it. | Test missing, unreadable, malformed, empty, and valid databases. |
+| FR-007 | Before relying on a database, the product SHALL validate that it exists, is readable, is syntactically valid, and contains usable TU entries; failure SHALL be recoverable for syntactic discovery. | Test missing, unreadable, malformed, empty, and valid databases. |
 | FR-008 | The product SHALL interpret each analyzed TU using the working directory, source file, compiler arguments or command, and build options in its database entry. | Use a fixture whose resolution depends on an include path and definition. |
 | FR-009 | The product SHALL report unusable database entries with the affected entry and reason. | Supply missing-file and unusable-command entries. |
-| FR-010 | The product SHALL report when no database entry supplies build context for a TU required by the query. | Query a source omitted from the database. |
-| FR-011 | The product SHALL NOT guess missing build options and report the resulting relationship as confirmed. | Omit required compile context and inspect status. |
+| FR-010 | The product SHALL report when no database entry supplies build context for a query candidate and SHALL retain complete syntactic candidates as non-confirmed by default. | Query a source omitted from the database. |
+| FR-011 | The product SHALL NOT guess missing build options or report the resulting relationship as confirmed; `--verified-only` SHALL exclude it. | Omit required compile context and inspect confidence and filtering. |
 | FR-078 | When multiple compilation contexts apply to a required source file, the product SHALL analyze every applicable context, merge equivalent results, and preserve the contributing context provenance on each reported edge. | Analyze a source whose two contexts select different conditional calls and inspect both edges and their provenance. |
 
 ### 4.3 Target symbol identification
@@ -194,14 +194,14 @@ column defines minimum test evidence.
 | --- | --- | --- |
 | FR-046 | Every reported edge SHALL have exactly one state: `CONFIRMED`, `POSSIBLE`, or `UNRESOLVED`. | Validate every edge in a mixed fixture. |
 | FR-047 | `CONFIRMED` SHALL mean semantic evidence identifies the edge. | Compare a direct call with semantic evidence. |
-| FR-049 | `POSSIBLE` SHALL mean the edge is a valid candidate among targets that cannot be uniquely proven. | Analyze multiple virtual or indirect targets. |
-| FR-050 | `UNRESOLVED` SHALL mean semantic analysis completed successfully but available evidence could not identify a unique callee target. | Analyze an unresolved indirect call without causing an analysis failure. |
+| FR-049 | `POSSIBLE` SHALL mean the edge is a complete syntactic candidate not semantically checked, or a verified valid candidate among targets that cannot be uniquely proven. | Analyze missing-context and multiple-runtime-target fixtures. |
+| FR-050 | `UNRESOLVED` SHALL mean available syntactic or semantic evidence could not identify a callee target. | Analyze an indirect or syntax-only call without an identifiable target. |
 | FR-051 | The product SHALL expose unresolved call sites instead of omitting them or converting them into definite targets. | Inspect unresolved fixture output. |
 | FR-052 | Every edge SHALL have a call kind independent of confidence. | Validate both fields for direct and virtual calls. |
 | FR-053 | The product SHALL support direct, virtual, function-pointer, template, macro-expanded, foreign, and unresolved call kinds. | Exercise or unit-check each classification. |
 | FR-054 | Verified-only output SHALL exclude every edge not marked `CONFIRMED`. | Compare default and verified-only output. |
 | FR-076 | The initial product SHALL NOT emit or expose a `PROBABLE` confidence state. | Inspect all CLI operations and confidence constructors. |
-| FR-079 | A query containing `UNRESOLVED` edges but no analysis failure SHALL be a successfully completed query with zero process status. | Run an indirect-call fixture that resolves to `UNRESOLVED` and inspect status. |
+| FR-079 | A completed query containing `UNRESOLVED` edges SHALL return zero process status even when optional semantic verification was unavailable. | Run semantic and syntax-only unresolved fixtures and inspect status. |
 
 `FR-048` is retired because the initial `PROBABLE` definition was removed. The
 identifier is permanently reserved and is not reused.
@@ -234,14 +234,14 @@ identifier is permanently reserved and is not reused.
 | FR-066 | The complete initial product CLI SHALL provide callers, callees, path, and explain operations. | Inspect help and invoke each operation. |
 | FR-067 | The CLI SHALL provide help describing required inputs and supported options. | Invoke top-level and command help. |
 | FR-068 | The CLI SHALL reject missing arguments, unsupported options, and invalid values with a diagnostic identifying the problem. | Exercise every invalid class. |
-| FR-069 | The CLI SHALL return non-zero status for invalid invocation, invalid required input, ambiguous required symbol selection, or analysis failure. | Capture status for every condition. |
-| FR-070 | A completed query SHALL return zero status, including a query with no result, unresolved edges without analysis failure, or user-requested depth truncation. | Capture positive, empty, unresolved, and truncated-query statuses. |
+| FR-069 | The CLI SHALL return non-zero status for invalid invocation, invalid required input, ambiguous required symbol selection, or unrecoverable analysis failure. | Capture status for every condition. |
+| FR-070 | A completed query SHALL return zero status, including a query with no result, non-confirmed fallback edges, unresolved edges, or user-requested depth truncation. | Capture positive, fallback, empty, unresolved, and truncated-query statuses. |
 | FR-071 | The CLI SHALL distinguish invalid input, ambiguity, no result, truncated result, unresolved result, partial result, and internal failure. | Trigger and compare each outcome. |
 | FR-072 | The CLI SHALL provide maximum-depth control for recursive callers, callees, and path queries. | Invoke each operation with a depth. |
 | FR-073 | The CLI SHALL provide verified-only control for callers, callees, and path queries. | Compare mixed-confidence output. |
 | FR-074 | Human-readable output SHALL include qualified names where available, source locations, confidence for non-confirmed edges, and confirmed and unresolved edge counts. | Inspect mixed multi-edge output. |
 | FR-075 | The initial release SHALL NOT require a machine-readable output format. | Confirm acceptance does not depend on such output. |
-| FR-080 | If a required analysis operation fails and independently valid results exist, the product SHALL return a partial result containing those results and diagnostics identifying the failed work. | Cause one required TU to fail while another yields a confirmed edge. |
+| FR-080 | If semantic verification fails but complete syntactic candidates exist, the product SHALL retain them as non-confirmed results with diagnostics; `Partial` is reserved for failed work that has no safe candidate representation. | Cause one relevant TU to fail while another yields a confirmed edge. |
 | FR-081 | A partial result SHALL return non-zero process status, while a truncated result caused only by the user-supplied depth limit SHALL return zero process status. | Capture status for one partial query and one bounded truncated query. |
 
 ## 5. Non-functional requirements
@@ -288,7 +288,7 @@ identifier is permanently reserved and is not reused.
 | --- | --- | --- |
 | NFR-022 | For a focused query whose candidate set excludes at least one TU, the product SHALL NOT semantically verify an excluded TU. | Run a controlled multi-TU fixture and compare candidate and verification sets. |
 | NFR-023 | Recursive queries SHALL remain bounded by frontier exhaustion or user depth and SHALL terminate for finite project input. | Run deep and cyclic scale fixtures under a timeout. |
-| NFR-024 | Release documentation SHALL list every supported host OS, architecture, required Clang compatibility range, and compilation-database assumption. | Inspect release documentation. |
+| NFR-024 | Release documentation SHALL list every supported host OS, architecture, optional Clang compatibility range, and compilation-database assumption. | Inspect release documentation. |
 | NFR-025 | The CLI SHALL meet the same functional requirements on every documented host, except for host-native path representation and platform-specific environment diagnostics. | Run conformance on each supported host. |
 | NFR-026 | The initial supported-host list SHALL remain `TBD` until repeatable build and conformance checks pass on each claimed host. | Review conformance evidence before a support claim. |
 
@@ -329,14 +329,14 @@ deferred beyond this PoC milestone as resolved in Section 10.
 | AC-008 | Relevant candidates sharing one TU build context SHALL require one semantic interpretation of that context within a query. | FR-045 |
 | AC-009 | A focused multi-TU query SHALL show that a complete semantic graph is not prerequisite and SHALL report the NFR-003 workload counters. | FR-044, NFR-001–NFR-003, NFR-007 |
 | AC-010 | Acceptance SHALL succeed with network denied and SHALL produce no outbound request or source modification. | FR-005, NFR-015–NFR-020 |
-| AC-011 | Invalid roots, databases, invocations, ambiguous symbols, and missing symbols SHALL produce specified diagnostics and statuses. | FR-003, FR-006–FR-010, FR-015–FR-016, FR-068–FR-071 |
+| AC-011 | Invalid roots, databases, invocations, ambiguous symbols, and missing symbols SHALL produce specified diagnostics and statuses; invalid databases SHALL still permit syntactic discovery. | FR-003, FR-006–FR-010, FR-015–FR-016, FR-068–FR-071 |
 | AC-012 | Repeated execution with unchanged inputs SHALL produce deterministic semantic output. | NFR-011–NFR-012 |
 | AC-013 | The acceptance fixture SHALL cover a direct free-function call, method call through a pointer or reference, overloads, a virtual call with multiple possible targets, an unresolved indirect call, and a cycle. | Fixture source inspection and build. |
 | AC-014 | An automated end-to-end check SHALL assert the expected confirmed path and unresolved count. | Execute the check against the acceptance fixture. |
 | AC-015 | The PoC SHALL produce every measurement and workload counter specified by NFR-003. | Inspect benchmark output. |
 | AC-016 | A recursive query without maximum depth SHALL traverse beyond an arbitrary shallow bound and SHALL terminate when a cycle is present. | Run an unbounded deep-chain and cyclic fixture. |
 | AC-017 | A source compiled once with `FEATURE_A` and once with `FEATURE_B` SHALL report context-specific edges from both contexts and preserve their provenance after merge. | Run the two-context conditional-compilation fixture. |
-| AC-018 | An unresolved-only query SHALL exit zero, a depth-truncated query SHALL exit zero and report truncation, and a required-TU failure with usable results SHALL return partial output and exit non-zero. | Execute and capture all three result classes. |
+| AC-018 | An unresolved-only query SHALL exit zero, a depth-truncated query SHALL exit zero and report truncation, and a relevant-TU failure SHALL retain complete syntactic candidates as non-confirmed and exit zero for a completed query. | Execute and capture all three result classes. |
 
 Fixed latency, memory, storage, scale, and supported-host gates are not
 fabricated for the PoC. NFR-004–NFR-006 and NFR-026 govern when evidence is
@@ -394,11 +394,11 @@ phasing but do not override the concept.
 | RES-008 | Architecture specifies TU batching, while an SRS should avoid internal design. | The testable behavior is one semantic interpretation per TU build context within a query and no unrelated project-wide verification; no scheduler design is prescribed. |
 | RES-009 | PoC lists output fields, but concept examples are not a frozen format. | Required information is fixed; tree versus linear layout and exact wording are not. |
 | RES-010 | No source gives validated latency, memory, scale, or platform numbers. | Values remain `TBD`; NFR-003–NFR-006 and NFR-024–NFR-026 define evidence for setting them. |
-| RES-011 | The concept names source root and compilation database as inputs, while CLI examples omit how those inputs are supplied. | The CLI must accept both inputs, but this SRS does not freeze flags, defaults, environment variables, or discovery conventions. |
+| RES-011 | Earlier text treated source root and compilation database as equally required inputs. | The source root is required; the CLI accepts an optional compilation database for semantic strengthening without freezing its flag or discovery convention. |
 | RES-012 | The concept explicitly assigns Tree-sitter to discovery and Clang to verification, while an SRS normally avoids implementation choices. | Their selection is retained only as the concept-mandated technology constraint CON-008. Functional requirements remain stated as observable behavior and do not prescribe internal integration design. |
 | RES-013 | The source documents do not define recursive-query behavior when maximum depth is omitted. | Omission means no logical depth limit; cycle detection still bounds repeated traversal. |
 | RES-014 | The source documents do not define how to select among multiple compilation contexts for one source file. | Analyze all applicable contexts, merge equivalent results, and retain context provenance rather than choosing one. |
-| RES-015 | The source documents do not clearly separate unresolved semantic results from failed analysis work. | `UNRESOLVED` is a successful analysis result; failure of required work produces a partial or failed analysis result instead. |
+| RES-015 | The source documents did not define behavior when optional semantic work fails. | Complete syntactic candidates remain non-confirmed with diagnostics; `UNRESOLVED` is a successful result when no target identity is available, and only work without a safe candidate representation can make output partial. |
 | RES-016 | The source documents distinguish depth-limited output but do not define its process status. | Reaching a user-supplied depth limit is a successful truncated result with exit status zero. |
 
 ## 11. SRS quality review

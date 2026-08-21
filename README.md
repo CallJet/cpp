@@ -20,21 +20,20 @@ Traditional static analysis tools parse the entire codebase with a compiler fron
 
 1. **Text Prefilter**: Searches for the requested symbol spelling and extracts only files that can contain a relevant declaration or call.
 2. **Lazy Tree-sitter Discovery**: Parses only those matched files, then reuses their candidate symbols and call sites as traversal expands. It does not build a project-wide AST index at startup.
-3. **Clang Demand-Driven Semantic Verification**: Uses `libclang` to verify **only the compilation contexts connected to the active candidates**. A missing context never falls back to scanning every entry in `compile_commands.json`.
+3. **Optional Clang Semantic Strengthening**: Uses `libclang` to upgrade candidates only in compilation contexts connected to the active query. If the database, context, or `libclang` is unavailable, CallJet keeps complete Tree-sitter candidates as `[POSSIBLE]`; it neither fails the query nor scans every entry in `compile_commands.json`.
 
 ---
 
 ## 🛠 Prerequisites
 
 * **Rust**: `1.80` or newer (with Cargo)
-* **LLVM / Clang**: `libclang` (v16+ recommended)
+* **LLVM / Clang (optional)**: `libclang` (v16+ recommended) enables `[CONFIRMED]` semantic results
   * **Windows**: `winget install LLVM.LLVM` or download from [LLVM Releases](https://github.com/llvm/llvm-project/releases)
   * **Linux (Ubuntu/Debian)**: `sudo apt-get install libclang-dev clang`
   * **macOS**: `brew install llvm`
-* **Compilation Database**: `compile_commands.json` for your project
+* **Compilation Database (optional, recommended)**: `compile_commands.json` supplies build context for Clang verification
   * When using CMake: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-  * If the file is missing, CallJet stops before source parsing and prints the
-    exact CMake generation command plus the `--compile-commands` invocation.
+  * If it is missing or invalid, CallJet continues with Tree-sitter candidates. Use `-v` to see the recoverable diagnostic.
 
 ---
 
@@ -57,7 +56,7 @@ cargo build --release
 For the common case, pass one method to `trace`. The lower-level commands remain available for directional and two-endpoint queries.
 
 ### 1. `trace` — One-method Call Path
-Finds verified paths from discovered top-level callers to one target method.
+Finds candidate paths from discovered top-level callers to one target method and upgrades edges when Clang verification is available.
 
 ```bash
 calljet trace <METHOD> [OPTIONS]
@@ -117,7 +116,7 @@ calljet path main calculate_checksum --max-depth 5
 ---
 
 ### 5. `explain` — Call Edge Evidence Explanation
-Inspects the semantic verification evidence between a `<caller>` and a `<callee>`.
+Inspects the available syntactic or semantic evidence between a `<caller>` and a `<callee>`.
 
 ```bash
 calljet explain <CALLER_SYMBOL> <CALLEE_SYMBOL> [OPTIONS]
@@ -133,11 +132,11 @@ calljet explain process_event dispatch
 | Option | Short | Default | Description |
 | --- | :---: | --- | --- |
 | `--root <PATH>` | `-r` | `.` (current directory) | Root directory of the source project |
-| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | Path to `compile_commands.json` |
+| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | Optional build context for Clang verification |
 | `--format <FORMAT>` | `-f` | `text` | Output format (`text`, `json`, `mermaid`, `dot`) |
 | `--output <FILE>` | `-o` | stdout | Save result directly to a specified output file |
 | `--max-depth <N>` | `-d` | Unbounded | Maximum traversal depth limit |
-| `--verified-only` | - | `false` | Filter traversal to only `[CONFIRMED]` edges |
+| `--verified-only` | - | `false` | Filter traversal to only `[CONFIRMED]` edges; no Clang context may therefore produce no result |
 | `--no-unresolved` | - | `false` | Exclude `[UNRESOLVED]` indirect edges from results |
 | `--no-foreign` | - | `false` | Exclude foreign external library boundary calls |
 | `--metrics` | - | `false` | Output detailed timing and performance metrics |
@@ -151,7 +150,7 @@ calljet explain process_event dispatch
 CallJet employs an honest **3-state Confidence Model**:
 
 * **`[CONFIRMED]`**: Statically proven direct call verified by Clang.
-* **`[POSSIBLE]`**: Valid candidate with multiple runtime targets (e.g. virtual method dispatch).
+* **`[POSSIBLE]`**: A complete Tree-sitter candidate not checked by Clang, or a verified call with multiple runtime targets (e.g. virtual dispatch).
 * **`[UNRESOLVED]`**: Semantic call target could not be statically determined (e.g. indirect function pointer).
 
 ### Default Output (`calljet trace c_leaf`)
@@ -171,7 +170,7 @@ Successful default text output prints only qualified function symbols, such as `
 | :---: | --- | --- |
 | **`0`** | `Complete` / `NoResult` / `Truncated` | Successful query (including empty results or depth bound reached) |
 | **`1`** | `Partial` / `InputError` / `QueryError` | Partial analysis due to some TU errors, input error, or symbol not found |
-| **`2`** | `FatalError` | Internal error or failure to load libclang |
+| **`2`** | `FatalError` | Internal fatal error |
 
 ---
 

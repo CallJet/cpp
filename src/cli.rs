@@ -40,7 +40,7 @@ pub struct CommonOptions {
     #[arg(short = 'r', long = "root", value_name = "PATH", global = true)]
     pub root: Option<PathBuf>,
 
-    /// compile_commands.json 파일 경로 (기본값: <root>/compile_commands.json)
+    /// Clang 검증용 compile_commands.json 경로 (없으면 Tree-sitter 후보 분석)
     #[arg(
         short = 'c',
         long = "compile-commands",

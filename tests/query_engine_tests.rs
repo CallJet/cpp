@@ -1,15 +1,204 @@
 //! 온디맨드 쿼리 및 순회 엔진 단위 및 통합 테스트
 //! Unit and integration tests for on-demand query engine
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use tempfile::tempdir;
 
 use calljet::cli::ProjectInput;
-use calljet::diagnostic::{FatalError, QueryError};
-use calljet::model::{CallKind, Completion, Confidence, QueryRequest, SymbolQuery};
+use calljet::diagnostic::{AnalysisCause, AnalysisIssue, FatalError, QueryError, Severity};
+use calljet::discovery::DiscoveryIndex;
+use calljet::model::{
+    CallEdge, CallEdgeId, CallKind, CandidateSymbol, CompilationKey, Completion, Confidence,
+    QueryRequest, Symbol, SymbolId, SymbolQuery, VerificationEvidence, VerificationReason,
+};
 use calljet::project::ProjectContext;
 use calljet::query::QueryEngine;
 use calljet::semantic::clang::{ensure_libclang_loaded, ClangProvider};
+use calljet::semantic::{
+    ResolutionBatch, SemanticProvider, VerificationBatch, VerificationResult,
+};
+
+#[derive(Default)]
+struct UnavailableSemanticProvider;
+
+impl SemanticProvider for UnavailableSemanticProvider {
+    fn resolve_symbols(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _candidates: &[calljet::model::CandidateSymbolId],
+    ) -> ResolutionBatch {
+        ResolutionBatch {
+            issues: vec![translation_unit_failure()],
+            failed_contexts: 1,
+            ..ResolutionBatch::default()
+        }
+    }
+
+    fn verify_calls(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _batch: VerificationBatch,
+    ) -> VerificationResult {
+        VerificationResult {
+            issues: vec![translation_unit_failure()],
+            ..VerificationResult::default()
+        }
+    }
+}
+
+#[derive(Default)]
+struct CheckedButMissingSemanticProvider;
+
+impl SemanticProvider for CheckedButMissingSemanticProvider {
+    fn resolve_symbols(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _candidates: &[calljet::model::CandidateSymbolId],
+    ) -> ResolutionBatch {
+        ResolutionBatch {
+            checked_contexts: 1,
+            ..ResolutionBatch::default()
+        }
+    }
+
+    fn verify_calls(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _batch: VerificationBatch,
+    ) -> VerificationResult {
+        VerificationResult {
+            context_checked: true,
+            ..VerificationResult::default()
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResolutionUnavailableButVerificationAvailable {
+    next_edge_id: u32,
+}
+
+impl SemanticProvider for ResolutionUnavailableButVerificationAvailable {
+    fn resolve_symbols(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _candidates: &[calljet::model::CandidateSymbolId],
+    ) -> ResolutionBatch {
+        ResolutionBatch {
+            failed_contexts: 1,
+            ..ResolutionBatch::default()
+        }
+    }
+
+    fn verify_calls(
+        &mut self,
+        _project: &ProjectContext,
+        discovery: &DiscoveryIndex,
+        batch: VerificationBatch,
+    ) -> VerificationResult {
+        let mut result = VerificationResult {
+            context_checked: true,
+            ..VerificationResult::default()
+        };
+
+        for call_id in batch.calls {
+            let Some(call) = discovery.calls.get(&call_id) else {
+                continue;
+            };
+            let Some(caller_candidate) = discovery.symbols.get(&call.caller) else {
+                continue;
+            };
+            let Some(callee_candidate) = discovery
+                .symbols
+                .values()
+                .find(|candidate| candidate.name == call.callee_spelling)
+            else {
+                continue;
+            };
+
+            let caller = candidate_as_clang_symbol(caller_candidate);
+            let callee = candidate_as_clang_symbol(callee_candidate);
+            for symbol in [caller.clone(), callee.clone()] {
+                if !result.symbols.iter().any(|existing| existing.id == symbol.id) {
+                    result.symbols.push(symbol);
+                }
+            }
+
+            let mut contexts = BTreeSet::new();
+            contexts.insert(batch.context.clone());
+            let mut evidence_by_context = BTreeMap::new();
+            evidence_by_context.insert(
+                batch.context.clone(),
+                VerificationEvidence {
+                    expression_text: call.expression_text.clone(),
+                    static_target: Some(callee.clone()),
+                    candidate_targets: vec![callee.clone()],
+                    clang_diagnostics: Vec::new(),
+                    reason: VerificationReason::ExactReference,
+                    spelling_location: call.callee_location.clone(),
+                    expansion_location: Some(call.expression.start.clone()),
+                    is_virtual: false,
+                    is_template_related: false,
+                    is_macro_expanded: false,
+                },
+            );
+
+            self.next_edge_id = self.next_edge_id.saturating_add(1);
+            result.edges.push(CallEdge {
+                id: CallEdgeId(self.next_edge_id),
+                caller: caller.id,
+                callee: Some(callee.id),
+                callsite: call.expression.clone(),
+                kind: CallKind::Direct,
+                confidence: Confidence::Confirmed,
+                contexts,
+                evidence_by_context,
+            });
+        }
+
+        result
+    }
+}
+
+fn translation_unit_failure() -> AnalysisIssue {
+    AnalysisIssue {
+        severity: Severity::Recoverable,
+        context: Some(CompilationKey("test-context".to_string())),
+        location: None,
+        message: "libclang unavailable".to_string(),
+        cause: AnalysisCause::TranslationUnitParseFailed,
+    }
+}
+
+fn candidate_as_clang_symbol(candidate: &CandidateSymbol) -> Symbol {
+    let qualified_name = candidate
+        .qualifier_hint
+        .as_deref()
+        .map(|qualifier| format!("{qualifier}{}", candidate.name))
+        .unwrap_or_else(|| candidate.name.clone());
+    Symbol {
+        id: SymbolId::clang_usr(
+            candidate.language,
+            format!("test:clang:{qualified_name}"),
+        ),
+        name: candidate.name.clone(),
+        qualified_name: Some(qualified_name),
+        namespace: None,
+        class_name: None,
+        signature: None,
+        declaration: Some(candidate.declaration.start.clone()),
+        definition: candidate
+            .definition_body
+            .as_ref()
+            .map(|range| range.start.clone()),
+    }
+}
 
 #[test]
 fn test_query_engine_callers_and_callees() {
@@ -424,4 +613,157 @@ fn test_virtual_call_and_trace_match_cross_tu_derived_override() {
         })
         .collect::<Vec<_>>();
     assert_eq!(path_names, vec!["invoke", "Derived::target"]);
+}
+
+#[test]
+fn test_treesitter_fallback_survives_unavailable_semantic_provider() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "chain.cpp",
+            "command": "clang++ -c chain.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let mut engine = QueryEngine::new(&project, UnavailableSemanticProvider);
+    let result = engine
+        .execute(QueryRequest::Trace {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+
+    assert_eq!(result.completion, Completion::Complete);
+    assert_eq!(result.edges.len(), 2);
+    assert!(result
+        .edges
+        .iter()
+        .all(|edge| edge.confidence == Confidence::Possible));
+    assert_eq!(result.metrics.verified_translation_units, 0);
+    assert!(result.metrics.verified_source_files.is_empty());
+    assert!(!result.diagnostics.is_empty());
+    let path_names = result.paths[0]
+        .nodes
+        .iter()
+        .map(|id| result.symbols.get(id).unwrap().display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(path_names, vec!["root_fn", "mid", "leaf"]);
+
+    let mut verified_only_engine = QueryEngine::new(&project, UnavailableSemanticProvider);
+    let verified_only = verified_only_engine
+        .execute(QueryRequest::Trace {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: true,
+        })
+        .unwrap();
+    assert_eq!(verified_only.completion, Completion::NoResult);
+    assert!(verified_only.edges.is_empty());
+    assert!(verified_only.paths.is_empty());
+}
+
+#[test]
+fn test_checked_semantic_context_still_rejects_missing_symbol() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("conditional.cpp"), "void hidden_target() {}\n").unwrap();
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "conditional.cpp",
+            "command": "clang++ -c conditional.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let mut engine = QueryEngine::new(&project, CheckedButMissingSemanticProvider);
+    let error = engine
+        .execute(QueryRequest::Callers {
+            target: SymbolQuery::parse("hidden_target"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .expect_err("정상 검사한 컨텍스트의 거부 결과를 구문 후보로 되살리면 안 됨");
+    assert!(matches!(
+        error,
+        FatalError::Query(QueryError::SymbolNotFound { query }) if query == "hidden_target"
+    ));
+}
+
+#[test]
+fn test_mixed_treesitter_and_clang_symbol_ids_keep_paths_connected() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "chain.cpp",
+            "command": "clang++ -c chain.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let mut engine = QueryEngine::new(
+        &project,
+        ResolutionUnavailableButVerificationAvailable::default(),
+    );
+    let result = engine
+        .execute(QueryRequest::Path {
+            source: SymbolQuery::parse("root_fn"),
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+
+    assert_eq!(result.completion, Completion::Complete);
+    assert_eq!(result.edges.len(), 2);
+    assert!(result
+        .edges
+        .iter()
+        .all(|edge| edge.confidence == Confidence::Confirmed));
+    let path_names = result.paths[0]
+        .nodes
+        .iter()
+        .map(|id| result.symbols.get(id).unwrap().display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(path_names, vec!["root_fn", "mid", "leaf"]);
 }

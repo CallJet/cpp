@@ -70,7 +70,10 @@ Clang can then verify the relevant call as:
 Worker::run -> Foo::execute(Context&)
 ```
 
-Tree-sitter discovers. Clang verifies.
+Tree-sitter discovers and supplies the usable baseline. When available, Clang
+verifies and strengthens that baseline. If semantic build context cannot be
+used, the syntactic relationship remains visible as `POSSIBLE`, never as
+`CONFIRMED`.
 
 ### Uncertainty is part of the result
 
@@ -82,7 +85,7 @@ Initial result confidence levels are:
 | Confidence | Meaning |
 | --- | --- |
 | `CONFIRMED` | Semantic evidence identifies the edge. |
-| `POSSIBLE` | The edge is a valid candidate among multiple targets. |
+| `POSSIBLE` | The edge is a syntactically valid candidate not checked by Clang, or a verified candidate among multiple runtime targets. |
 | `UNRESOLVED` | CallJet cannot identify a target with available evidence. |
 
 The initial product does not emit `PROBABLE`. Such a state may be considered
@@ -132,12 +135,13 @@ treated accordingly.
 | Interface | CLI |
 | Analysis | Static |
 | Execution | Local |
-| Build context | `compile_commands.json` |
+| Build context | Optional `compile_commands.json` for semantic strengthening |
 | Network | None |
 
-Primary inputs are a source root, compilation database, target function, and
-an optional source function. Primary outputs are call paths, callers, callees,
-source locations, call classifications, confidence, and verification evidence.
+Primary inputs are a source root, target function, an optional compilation
+database, and an optional source function. Primary outputs are call paths,
+callers, callees, source locations, call classifications, confidence, and
+available verification evidence.
 
 ## CLI experience
 

@@ -190,25 +190,30 @@ fn test_missing_compilation_database_help_is_actionable() {
     let help = missing_compilation_database_help(path);
 
     assert!(help.contains("project/compile_commands.json"));
-    assert!(help.contains("analysis stopped before source parsing"));
+    assert!(help.contains("continuing with Tree-sitter candidates"));
+    assert!(help.contains("Clang semantic verification is unavailable"));
     assert!(help.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
     assert!(help.contains("--compile-commands build/compile_commands.json"));
 }
 
 #[test]
-fn test_missing_compile_commands_prints_banner_logs_and_help() {
+fn test_missing_compile_commands_uses_quiet_treesitter_fallback() {
     let root = tempdir().unwrap();
+    std::fs::write(
+        root.path().join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_calljet"))
-        .args(["callers", "target", "--root"])
+        .args(["trace", "leaf", "--root"])
         .arg(root.path())
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("FIND THE PATH. SKIP THE WHOLE GRAPH."));
-    assert!(stderr.contains("[CallJet] loading project..."));
-    assert!(stderr.contains("compilation database not found"));
-    assert!(stderr.contains("analysis stopped before source parsing"));
-    assert!(stderr.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "root_fn\nmid\nleaf\n"
+    );
+    assert!(output.stderr.is_empty());
 }

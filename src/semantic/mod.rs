@@ -35,6 +35,8 @@ pub struct VerificationBatch {
 /// 엣지 검증 결과 (Verification Result)
 #[derive(Debug, Clone, Default)]
 pub struct VerificationResult {
+    /// 요청한 컴파일 컨텍스트의 TU를 정상 파싱해 호출 후보를 검사할 수 있었는지 여부
+    pub context_checked: bool,
     /// 검증된 엣지의 호출자/피호출자 심볼 메타데이터
     pub symbols: Vec<Symbol>,
     /// 검증된 엣지 목록

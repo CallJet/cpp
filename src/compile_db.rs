@@ -237,7 +237,7 @@ fn shlex_split(cmd: &str) -> Vec<String> {
         }
 
         match ch {
-            '\\' if !in_single_quotes => {
+            '\\' if !in_single_quotes && !in_double_quotes => {
                 escaped = true;
             }
             '\'' if !in_double_quotes => {
@@ -271,6 +271,7 @@ fn shlex_split(cmd: &str) -> Vec<String> {
 fn normalize_compiler_args(raw_args: &[String], target_file_spelling: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
+    let compiler_name = raw_args.first().map(String::as_str).unwrap_or("");
 
     // 첫 번째 인자(컴파일러 이름)는 건너뜀
     let args_slice = if raw_args.len() > 1 {
@@ -278,6 +279,19 @@ fn normalize_compiler_args(raw_args: &[String], target_file_spelling: &str) -> V
     } else {
         raw_args
     };
+
+    // clang++/g++ 드라이버가 암시적으로 선택하던 C++ 언어 모드는
+    // 컴파일러 실행 파일을 제거한 뒤 libclang 인자에 명시적으로 복원한다.
+    if !args_slice.iter().any(|arg| arg == "-x") {
+        let compiler_file_name = Path::new(compiler_name)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(compiler_name);
+        if compiler_file_name.ends_with("++") {
+            result.push("-x".to_string());
+            result.push("c++".to_string());
+        }
+    }
 
     let target_file_name = Path::new(target_file_spelling)
         .file_name()

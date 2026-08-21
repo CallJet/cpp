@@ -17,21 +17,20 @@
 
 1. **텍스트 사전 필터 (Text Prefilter)**: 요청한 심볼 이름을 먼저 검색하여 관련 선언이나 호출이 존재할 수 있는 파일만 추립니다.
 2. **Tree-sitter 지연 탐색 (Lazy Discovery)**: 사전 필터와 일치한 파일만 파싱하고, 순회가 확장될 때 발견한 후보를 재사용합니다. 시작 시 프로젝트 전체 AST 인덱스를 만들지 않습니다.
-3. **Clang 온디맨드 시맨틱 검증 (Demand-Driven Verification)**: 현재 후보에 연결된 컴파일 컨텍스트만 검증합니다. 컨텍스트가 없다는 이유로 `compile_commands.json` 전체 엔트리를 폴백 순회하지 않습니다.
+3. **선택적 Clang 시맨틱 강화 (Optional Semantic Strengthening)**: 현재 쿼리 후보에 연결된 컴파일 컨텍스트만 `libclang`으로 검증합니다. 데이터베이스·컨텍스트·`libclang`을 사용할 수 없으면 완전한 Tree-sitter 후보를 `[POSSIBLE]`로 유지하며, 쿼리를 실패시키거나 `compile_commands.json` 전체 엔트리를 폴백 순회하지 않습니다.
 
 ---
 
 ## 🛠 사전 요구사항 (Prerequisites)
 
 * **Rust**: `1.80` 이상 (Cargo 포함)
-* **LLVM / Clang**: `libclang` (버전 16 이상 권장)
+* **LLVM / Clang (선택 사항)**: `libclang` (버전 16 이상 권장)을 설치하면 `[CONFIRMED]` 시맨틱 결과를 얻을 수 있습니다.
   * **Windows**: `winget install LLVM.LLVM` 또는 [LLVM 공식 릴리스](https://github.com/llvm/llvm-project/releases) 설치
   * **Linux (Ubuntu/Debian)**: `sudo apt-get install libclang-dev clang`
   * **macOS**: `brew install llvm`
-* **Compilation Database**: 프로젝트의 `compile_commands.json`
+* **Compilation Database (선택 사항, 권장)**: `compile_commands.json`은 Clang 검증에 빌드 컨텍스트를 제공합니다.
   * CMake 사용 시: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-  * 파일이 없으면 소스 파싱 전에 중단하고 CMake 생성 명령과
-    `--compile-commands` 사용 예시를 출력합니다.
+  * 파일이 없거나 손상되어도 Tree-sitter 후보 분석은 계속합니다. 복구 진단은 `-v`에서 확인할 수 있습니다.
 
 ---
 
@@ -54,7 +53,7 @@ cargo build --release
 일반적인 사용은 메서드 하나만 `trace`에 전달하면 됩니다. 방향이나 양 끝점을 직접 지정하는 하위 명령도 그대로 제공합니다.
 
 ### 1. `trace` — 메서드 하나로 호출 경로 탐색
-발견된 최상위 호출자에서 대상 메서드까지 도달하는 검증 경로를 자동으로 출력합니다.
+발견된 최상위 호출자에서 대상 메서드까지 도달하는 후보 경로를 자동으로 출력하고, Clang을 사용할 수 있으면 각 엣지를 시맨틱 검증합니다.
 
 ```bash
 calljet trace <METHOD> [OPTIONS]
@@ -114,7 +113,7 @@ calljet path main calculate_checksum --max-depth 5
 ---
 
 ### 5. `explain` — 단일 호출 엣지 상세 검증 및 근거
-호출자(`caller`)와 피호출자(`callee`) 사이의 호출 엣지가 존재하는 이유와 Clang 시맨틱 검증 근거를 상세 출력합니다.
+호출자(`caller`)와 피호출자(`callee`) 사이의 호출 엣지가 존재하는 이유와 사용 가능한 Tree-sitter/Clang 근거를 상세 출력합니다.
 
 ```bash
 calljet explain <CALLER_SYMBOL> <CALLLEE_SYMBOL> [OPTIONS]
@@ -130,11 +129,11 @@ calljet explain process_event dispatch
 | 옵션 | 단축 | 기본값 | 설명 |
 | --- | :---: | --- | --- |
 | `--root <PATH>` | `-r` | `.` (현재 디렉토리) | 프로젝트 소스 루트 디렉토리 경로 |
-| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | `compile_commands.json` 파일 경로 |
+| `--compile-commands <PATH>` | `-c` | `<root>/compile_commands.json` | Clang 검증에 사용할 선택적 빌드 컨텍스트 |
 | `--format <FORMAT>` | `-f` | `text` | 출력 형식 (`text`, `json`, `mermaid`, `dot`) |
 | `--output <FILE>` | `-o` | 표준 출력(stdout) | 분석 결과를 지정한 파일로 직접 저장 |
 | `--max-depth <N>` | `-d` | 무제한 (사이클 자동 감지) | 순회 탐색의 최대 깊이 제한 |
-| `--verified-only` | - | `false` | `[CONFIRMED]` 신뢰도를 가진 엣지만 순회 |
+| `--verified-only` | - | `false` | `[CONFIRMED]` 엣지만 순회하며, Clang 컨텍스트가 없으면 결과가 없을 수 있음 |
 | `--no-unresolved` | - | `false` | `[UNRESOLVED]` 미해결 엣지를 결과에서 제외 |
 | `--no-foreign` | - | `false` | 외부 라이브러리 경계 호출을 결과에서 제외 |
 | `--metrics` | - | `false` | 소요 시간 및 메모리 등 성능 메트릭 상세 출력 |
@@ -148,7 +147,7 @@ calljet explain process_event dispatch
 CallJet은 정적 분석의 한계를 솔직하게 표시하는 3단계 신뢰도(Confidence) 시스템을 사용합니다:
 
 * **`[CONFIRMED]`**: Clang을 통해 정적으로 정확한 대상 심볼이 확인된 직접 호출 (Direct call)
-* **`[POSSIBLE]`**: 가상 함수(Virtual dispatch) 등 런타임에 여러 타겟으로 분기될 수 있는 호출
+* **`[POSSIBLE]`**: Clang으로 검사하지 못한 완전한 Tree-sitter 후보 또는 가상 함수처럼 검증 후에도 런타임 타겟이 여러 개인 호출
 * **`[UNRESOLVED]`**: 함수 포인터 등 정적으로 대상을 확정할 수 없는 호출
 
 ### 기본 출력 (`calljet trace c_leaf`)
@@ -168,7 +167,7 @@ c_leaf
 | :---: | --- | --- |
 | **`0`** | `Complete` / `NoResult` / `Truncated` | 정상 완료 (결과 없음 또는 깊이 제한 도달 포함) |
 | **`1`** | `Partial` / `InputError` / `QueryError` | 부분 분석 실패(일부 TU 오류) 또는 입력 오류 / 심볼 미발견 |
-| **`2`** | `FatalError` | 심각한 내부 오류 또는 libclang 로드 실패 |
+| **`2`** | `FatalError` | 심각한 내부 오류 |
 
 ---
 

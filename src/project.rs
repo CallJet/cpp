@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::ProjectInput;
 use crate::compile_db::CompilationDb;
-use crate::diagnostic::InputError;
+use crate::diagnostic::{AnalysisCause, AnalysisIssue, Diagnostic, InputError, Severity};
 
 /// 프로젝트 분석 컨텍스트 (Project Context)
 #[derive(Debug, Clone)]
@@ -47,8 +47,24 @@ impl ProjectContext {
             reason: format!("소스 루트 경로 정규화 실패: {e}"),
         })?;
 
-        // 4. 컴파일 데이터베이스 로드 및 검증 (FR-006, FR-007)
-        let compilation_db = CompilationDb::load(&input.compile_commands_path)?;
+        // 4. 컴파일 데이터베이스는 Clang 시맨틱 검증을 위한 선택 입력이다.
+        // 없거나 손상되어도 Tree-sitter 후보 탐색은 계속한다.
+        let compilation_db = match CompilationDb::load(&input.compile_commands_path) {
+            Ok(database) => database,
+            Err(error) => {
+                let mut database = CompilationDb::default();
+                database.diagnostics.push(Diagnostic::analysis(AnalysisIssue {
+                    severity: Severity::Recoverable,
+                    context: None,
+                    location: None,
+                    message: format!(
+                        "{error}; Clang 검증 없이 Tree-sitter 후보 분석을 계속합니다."
+                    ),
+                    cause: AnalysisCause::MissingCompilationContext,
+                }));
+                database
+            }
+        };
 
         Ok(Self {
             source_root: canonical_root,
