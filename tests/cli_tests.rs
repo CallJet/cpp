@@ -10,6 +10,33 @@ use clap::Parser;
 use tempfile::tempdir;
 
 #[test]
+fn test_cli_trace_parsing() {
+    let cli = Cli::try_parse_from([
+        "calljet",
+        "trace",
+        "ns::Class::method",
+        "--max-depth",
+        "8",
+    ])
+    .unwrap();
+
+    let (_, req) = cli.into_request().unwrap();
+    if let QueryRequest::Trace {
+        target,
+        max_depth,
+        verified_only,
+    } = req
+    {
+        assert_eq!(target.terminal_name, "method");
+        assert_eq!(target.qualifier_hint, Some("ns::Class::".to_string()));
+        assert_eq!(max_depth, Some(8));
+        assert!(!verified_only);
+    } else {
+        panic!("예상치 못한 커맨드 형태");
+    }
+}
+
+#[test]
 fn test_cli_callers_parsing() {
     let cli = Cli::try_parse_from([
         "calljet",
@@ -134,10 +161,10 @@ fn test_cli_rich_options_parsing() {
 }
 
 #[test]
-fn test_calljet_ascii_art_matches_aircraft_call_path_logo() {
-    assert!(CALLJET_ASCII_ART.contains(">---o"));
-    assert!(CALLJET_ASCII_ART.matches('o').count() >= 3);
-    assert!(CALLJET_ASCII_ART.contains("CallJet C++"));
+fn test_calljet_ascii_art_is_a_wordmark() {
+    assert!(CALLJET_ASCII_ART.contains("/ ____|"));
+    assert!(CALLJET_ASCII_ART.contains("| |___|"));
+    assert!(CALLJET_ASCII_ART.contains("\\_____\\__,_|_|_|"));
     assert!(CALLJET_ASCII_ART.contains("FIND THE PATH. SKIP THE WHOLE GRAPH."));
 }
 
@@ -163,7 +190,7 @@ fn test_missing_compile_commands_prints_banner_logs_and_help() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("CallJet C++"));
+    assert!(stderr.contains("FIND THE PATH. SKIP THE WHOLE GRAPH."));
     assert!(stderr.contains("[CallJet] loading project..."));
     assert!(stderr.contains("compilation database not found"));
     assert!(stderr.contains("analysis stopped before source parsing"));

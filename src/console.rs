@@ -2,20 +2,16 @@
 
 use std::path::Path;
 
-/// ASCII rendering of the CallJet aircraft and branching call paths.
+/// ASCII wordmark for the CallJet CLI.
 pub const CALLJET_ASCII_ART: &str = r#"
-                         o
-                        /
-             __________/
-==\    _____/___
-===\__/_________\____________>---o
-===/  \         /
-==/    \_______/
-                         \
-                          \_____o
+  _____      _ _      _      _
+ / ____|    | | |    | |    | |
+| |     __ _| | |    | | ___| |_
+| |    / _` | | | _  | |/ _ \ __|
+| |___| (_| | | || |_| |  __/ |_
+ \_____\__,_|_|_| \___/ \___|\__|
 
-                 CallJet C++
-       FIND THE PATH. SKIP THE WHOLE GRAPH.
+          FIND THE PATH. SKIP THE WHOLE GRAPH.
 "#;
 
 /// Actionable help displayed when the compilation database is absent.

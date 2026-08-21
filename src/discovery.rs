@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tree_sitter::{Node, Parser};
 
 use crate::model::{
@@ -25,6 +26,12 @@ pub struct NameKey {
 /// 인메모리 후보 탐색 인덱스 (Discovery Index)
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryIndex {
+    /// Tree-sitter로 실제 파싱한 소스 파일 목록
+    pub source_files: Vec<PathBuf>,
+    /// 이름 기반 텍스트 prefilter에서 검사한 파일 수 (중복 검색 포함)
+    pub source_files_inspected: usize,
+    /// 텍스트 prefilter와 Tree-sitter 후보 인덱스 구축에 걸린 누적 시간
+    pub discovery_time: Duration,
     /// 심볼 이름별 후보 심볼 ID 맵
     pub symbols_by_name: BTreeMap<NameKey, Vec<CandidateSymbolId>>,
     /// 후보 심볼 ID별 상세 데이터
@@ -39,19 +46,176 @@ pub struct DiscoveryIndex {
     pub file_includes: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
     /// 헤더 포함 관계 (Header -> Parent Source Files)
     pub include_parents: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+    /// 이름 검색에서 함께 발견된 직접 컴파일 가능한 컨텍스트
+    search_contexts_by_name: BTreeMap<String, Vec<CompilationKey>>,
+    /// 텍스트 검색에서 같은 후보군으로 묶인 헤더/소스별 컴파일 컨텍스트
+    search_contexts_by_file: BTreeMap<PathBuf, Vec<CompilationKey>>,
+    /// 아직 AST를 만들지 않은 프로젝트 내 C/C++ 파일 카탈로그
+    candidate_files: Option<Vec<PathBuf>>,
+    /// 이미 텍스트 prefilter를 끝낸 단말 이름
+    searched_names: BTreeSet<String>,
 }
 
 impl DiscoveryIndex {
-    /// 프로젝트 소스 파일들로부터 Tree-sitter 구문 분석을 수행하고 인덱스 구축
+    /// 프로젝트 전체 인덱스를 명시적으로 구축한다.
+    ///
+    /// 단위 테스트와 전체 인덱스가 필요한 호출자를 위한 호환 API이며,
+    /// 일반 쿼리 경로는 `discover_query`로 필요한 파일만 지연 파싱한다.
     pub fn build(project: &ProjectContext) -> Self {
-        let mut indexer = IndexBuilder::new(project);
-
+        let started = Instant::now();
+        eprintln!("[CallJet] discovery: scanning source tree...");
+        let scan_started = Instant::now();
         let source_files = project.source_files();
-        for file in source_files {
-            indexer.index_file(&file);
+        eprintln!(
+            "[CallJet] discovery: found {} C/C++ file(s) in {:?}",
+            source_files.len(),
+            scan_started.elapsed()
+        );
+
+        let mut index = Self {
+            candidate_files: Some(source_files.clone()),
+            source_files_inspected: source_files.len(),
+            ..Self::default()
+        };
+        index.index_files(project, &source_files);
+        index.discovery_time = started.elapsed();
+        eprintln!(
+            "[CallJet] discovery: complete — {} symbol candidate(s), {} call candidate(s) in {:?}",
+            index.symbols.len(),
+            index.calls.len(),
+            index.discovery_time
+        );
+        index
+    }
+
+    /// 심볼 쿼리에 필요한 파일만 텍스트로 좁힌 뒤 Tree-sitter로 지연 파싱한다.
+    pub fn discover_query(&mut self, project: &ProjectContext, query: &SymbolQuery) {
+        self.discover_spelling(project, &query.terminal_name);
+    }
+
+    /// 단말 이름이 등장하는 파일만 후보 인덱스에 추가한다.
+    pub fn discover_spelling(&mut self, project: &ProjectContext, spelling: &str) {
+        let spelling = spelling.trim();
+        if spelling.is_empty() || !self.searched_names.insert(spelling.to_string()) {
+            return;
         }
 
-        indexer.finish()
+        let started = Instant::now();
+        if self.candidate_files.is_none() {
+            eprintln!("[CallJet] discovery: collecting C/C++ file paths...");
+            let scan_started = Instant::now();
+            let files = project.source_files();
+            eprintln!(
+                "[CallJet] discovery: {} candidate file path(s) in {:?}",
+                files.len(),
+                scan_started.elapsed()
+            );
+            self.candidate_files = Some(files);
+        }
+
+        let files = self.candidate_files.clone().unwrap_or_default();
+        let total_files = files.len();
+        let progress_step = (total_files / 10).max(1);
+        let mut matches = Vec::new();
+
+        eprintln!(
+            "[CallJet] discovery: text prefilter '{}' across {} file(s)...",
+            spelling, total_files
+        );
+        for (index, file) in files.iter().enumerate() {
+            let processed = index + 1;
+            if processed == total_files || processed % progress_step == 0 {
+                let percent = processed.saturating_mul(100) / total_files.max(1);
+                eprintln!(
+                    "[CallJet] discovery: text prefilter {processed}/{total_files} ({percent}%)"
+                );
+            }
+
+            if file_contains_spelling(file, spelling) {
+                matches.push(file.clone());
+            }
+        }
+        self.source_files_inspected = self.source_files_inspected.saturating_add(total_files);
+
+        let mut context_keys = Vec::new();
+        for file in &matches {
+            for context in project.compilation_db.contexts_for_source(file) {
+                if !context_keys.contains(&context.key) {
+                    context_keys.push(context.key.clone());
+                }
+            }
+        }
+        self.search_contexts_by_name
+            .insert(spelling.to_string(), context_keys.clone());
+        for file in &matches {
+            let file_contexts = self
+                .search_contexts_by_file
+                .entry(file.clone())
+                .or_default();
+            for key in &context_keys {
+                if !file_contexts.contains(key) {
+                    file_contexts.push(key.clone());
+                }
+            }
+        }
+
+        let matched_count = matches.len();
+        let parsed = self.source_files.iter().cloned().collect::<BTreeSet<_>>();
+        let new_matches = matches
+            .into_iter()
+            .filter(|file| !parsed.contains(file))
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "[CallJet] discovery: '{}' matched {} file(s); Tree-sitter parsing {} new file(s)",
+            spelling,
+            matched_count,
+            new_matches.len()
+        );
+        self.index_files(project, &new_matches);
+        self.discovery_time += started.elapsed();
+    }
+
+    /// 아직 파싱하지 않은 파일만 기존 인덱스에 병합한다.
+    fn index_files(&mut self, project: &ProjectContext, files: &[PathBuf]) {
+        if files.is_empty() {
+            return;
+        }
+
+        let parsed = self.source_files.iter().cloned().collect::<BTreeSet<_>>();
+        let mut new_files = files
+            .iter()
+            .filter(|file| !parsed.contains(*file))
+            .cloned()
+            .collect::<Vec<_>>();
+        new_files.sort();
+        new_files.dedup();
+        if new_files.is_empty() {
+            return;
+        }
+
+        let total_files = new_files.len();
+        let progress_step = (total_files / 10).max(1);
+        let previous = std::mem::take(self);
+        let mut indexer = IndexBuilder::with_index(project, previous);
+
+        for (index, file) in new_files.iter().enumerate() {
+            let processed = index + 1;
+            if processed == 1 || processed == total_files || processed % progress_step == 0 {
+                let percent = processed.saturating_mul(100) / total_files.max(1);
+                eprintln!(
+                    "[CallJet] discovery: Tree-sitter {processed}/{total_files} ({percent}%) — {}",
+                    project.display_path(file).display()
+                );
+            }
+            indexer.index_file(file);
+        }
+
+        let mut index = indexer.finish();
+        index.source_files.extend(new_files);
+        index.source_files.sort();
+        index.source_files.dedup();
+        *self = index;
     }
 
     /// 쿼리와 매칭되는 후보 심볼 ID 목록 조회
@@ -123,33 +287,73 @@ impl DiscoveryIndex {
         project: &ProjectContext,
     ) -> Vec<CompilationKey> {
         if let Some(call) = self.calls.get(&call_id) {
-            let file = &call.expression.start.file;
-            let mut contexts = Vec::new();
-
-            // 1. 소스 파일 자체의 컴파일 컨텍스트 확인
-            for ctx in project.compilation_db.contexts_for_source(file) {
-                if !contexts.contains(&ctx.key) {
-                    contexts.push(ctx.key.clone());
-                }
+            let contexts = self.contexts_for_file(&call.expression.start.file, project);
+            if !contexts.is_empty() {
+                return contexts;
             }
 
-            // 2. 만약 헤더 파일이라면, 이 헤더를 포함하는 부모 소스 파일들의 컨텍스트 매핑
-            if contexts.is_empty() {
-                if let Some(parents) = self.include_parents.get(file) {
-                    for parent in parents {
-                        for ctx in project.compilation_db.contexts_for_source(parent) {
-                            if !contexts.contains(&ctx.key) {
-                                contexts.push(ctx.key.clone());
-                            }
+            if let Some(caller) = self.symbols.get(&call.caller) {
+                return self
+                    .search_contexts_by_name
+                    .get(&caller.name)
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// 특정 후보 심볼을 해석할 수 있는 컴파일 컨텍스트 키 목록 조회
+    pub fn contexts_for_symbol(
+        &self,
+        symbol_id: CandidateSymbolId,
+        project: &ProjectContext,
+    ) -> Vec<CompilationKey> {
+        let Some(symbol) = self.symbols.get(&symbol_id) else {
+            return Vec::new();
+        };
+
+        let contexts = self.contexts_for_file(&symbol.declaration.start.file, project);
+        if !contexts.is_empty() {
+            return contexts;
+        }
+
+        self.search_contexts_by_name
+            .get(&symbol.name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 소스 또는 헤더 파일을 사용할 수 있는 컴파일 컨텍스트 키 목록 조회
+    fn contexts_for_file(&self, file: &Path, project: &ProjectContext) -> Vec<CompilationKey> {
+        let mut contexts = Vec::new();
+
+        for ctx in project.compilation_db.contexts_for_source(file) {
+            if !contexts.contains(&ctx.key) {
+                contexts.push(ctx.key.clone());
+            }
+        }
+
+        if contexts.is_empty() {
+            if let Some(parents) = self.include_parents.get(file) {
+                for parent in parents {
+                    for ctx in project.compilation_db.contexts_for_source(parent) {
+                        if !contexts.contains(&ctx.key) {
+                            contexts.push(ctx.key.clone());
                         }
                     }
                 }
             }
-
-            return contexts;
         }
 
-        Vec::new()
+        if contexts.is_empty() {
+            if let Some(search_contexts) = self.search_contexts_by_file.get(file) {
+                contexts.extend(search_contexts.iter().cloned());
+            }
+        }
+
+        contexts
     }
 }
 
@@ -164,14 +368,29 @@ struct IndexBuilder<'a> {
 }
 
 impl<'a> IndexBuilder<'a> {
-    fn new(project: &'a ProjectContext) -> Self {
+    fn with_index(project: &'a ProjectContext, index: DiscoveryIndex) -> Self {
+        let next_symbol_id = index
+            .symbols
+            .keys()
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let next_call_id = index
+            .calls
+            .keys()
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
         Self {
             project,
-            index: DiscoveryIndex::default(),
+            index,
             symbol_keys: BTreeMap::new(),
             call_keys: BTreeMap::new(),
-            next_symbol_id: 1,
-            next_call_id: 1,
+            next_symbol_id,
+            next_call_id,
         }
     }
 
@@ -761,4 +980,35 @@ fn detect_language(path: &Path) -> Language {
     } else {
         Language::Cpp
     }
+}
+
+/// 파일 원문에 단말 이름이 식별자 경계로 등장하는지 빠르게 확인한다.
+/// Tree-sitter보다 먼저 실행되는 저비용 prefilter이므로 주석/문자열의 오탐은 허용한다.
+fn file_contains_spelling(path: &Path, spelling: &str) -> bool {
+    let Ok(content) = fs::read(path) else {
+        return false;
+    };
+    let needle = spelling.as_bytes();
+    if needle.is_empty() || content.len() < needle.len() {
+        return false;
+    }
+
+    let identifier = needle.iter().all(|byte| is_identifier_byte(*byte));
+    content.windows(needle.len()).enumerate().any(|(offset, window)| {
+        if window != needle {
+            return false;
+        }
+        if !identifier {
+            return true;
+        }
+
+        let left_ok = offset == 0 || !is_identifier_byte(content[offset - 1]);
+        let end = offset + needle.len();
+        let right_ok = end == content.len() || !is_identifier_byte(content[end]);
+        left_ok && right_ok
+    })
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
 }

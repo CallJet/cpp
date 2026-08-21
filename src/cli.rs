@@ -95,6 +95,19 @@ pub struct TraversalOptions {
 /// 서브커맨드 정의 (Commands)
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
+    /// 메서드 하나를 받아 최상위 호출자에서 해당 메서드까지의 경로를 자동 탐색
+    Trace {
+        /// 도달 경로를 찾을 메서드 또는 함수 이름
+        #[arg(value_name = "METHOD")]
+        target: String,
+
+        #[command(flatten)]
+        common: CommonOptions,
+
+        #[command(flatten)]
+        traversal: TraversalOptions,
+    },
+
     /// 대상 심볼을 호출하는 함수/메서드(호출자) 탐색
     Callers {
         /// 탐색 대상 심볼 이름 또는 쿼리
@@ -168,6 +181,23 @@ impl Cli {
         self,
     ) -> Result<(ProjectInput, QueryRequest, crate::render::RenderOptions), InputError> {
         let (common, request, no_unresolved, no_foreign) = match self.command {
+            Commands::Trace {
+                target,
+                common,
+                traversal,
+            } => {
+                let target_query = SymbolQuery::parse(&target);
+                (
+                    common,
+                    QueryRequest::Trace {
+                        target: target_query,
+                        max_depth: traversal.max_depth,
+                        verified_only: traversal.verified_only,
+                    },
+                    traversal.no_unresolved,
+                    traversal.no_foreign,
+                )
+            }
             Commands::Callers {
                 target,
                 common,

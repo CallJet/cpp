@@ -13,10 +13,11 @@
 
 ## 📌 핵심 원리 (Core Principle)
 
-기존 도구들은 전체 프로젝트를 빌드하거나 모든 소스 파일에 대해 Clang AST를 생성하느라 수 분~수십 분이 소요됩니다. CallJet은 **2단계 온디맨드 하이브리드 파이프라인**으로 이를 해결합니다:
+기존 도구들은 전체 프로젝트를 빌드하거나 모든 소스 파일에 대해 Clang AST를 생성하느라 수 분~수십 분이 소요됩니다. CallJet은 **3단계 온디맨드 파이프라인**으로 이를 해결합니다:
 
-1. **Tree-sitter 경량 구문 탐색 (Candidate Discovery)**: 밀리초(ms) 단위로 전체 프로젝트의 구문을 파싱하여 호출 후보 및 역방향 피호출자 인덱스(`calls_by_spelling`)를 생성합니다.
-2. **Clang 온디맨드 시맨틱 검증 (Demand-Driven Verification)**: 쿼리 순회 프론티어에서 **실제로 필요한 번역 단위(Translation Unit)만** 선별적으로 Clang 시맨틱 검증을 수행합니다.
+1. **텍스트 사전 필터 (Text Prefilter)**: 요청한 심볼 이름을 먼저 검색하여 관련 선언이나 호출이 존재할 수 있는 파일만 추립니다.
+2. **Tree-sitter 지연 탐색 (Lazy Discovery)**: 사전 필터와 일치한 파일만 파싱하고, 순회가 확장될 때 발견한 후보를 재사용합니다. 시작 시 프로젝트 전체 AST 인덱스를 만들지 않습니다.
+3. **Clang 온디맨드 시맨틱 검증 (Demand-Driven Verification)**: 현재 후보에 연결된 컴파일 컨텍스트만 검증합니다. 컨텍스트가 없다는 이유로 `compile_commands.json` 전체 엔트리를 폴백 순회하지 않습니다.
 
 ---
 
@@ -50,9 +51,21 @@ cargo build --release
 
 ## 💻 실행 방법 및 CLI 사용 가이드 (Usage)
 
-CallJet은 4가지 핵심 쿼리 명령어를 제공합니다.
+일반적인 사용은 메서드 하나만 `trace`에 전달하면 됩니다. 방향이나 양 끝점을 직접 지정하는 하위 명령도 그대로 제공합니다.
 
-### 1. `callers` — 역방향 호출자 탐색
+### 1. `trace` — 메서드 하나로 호출 경로 탐색
+발견된 최상위 호출자에서 대상 메서드까지 도달하는 검증 경로를 자동으로 출력합니다.
+
+```bash
+calljet trace <METHOD> [OPTIONS]
+
+# 예시: Controller::dispatch까지 들어오는 호출 경로 자동 탐색
+calljet trace "Controller::dispatch" --root . --compile-commands build/compile_commands.json
+```
+
+---
+
+### 2. `callers` — 역방향 호출자 탐색
 특정 함수/심볼을 호출하는 모든 상위 함수 체인을 온디맨드로 역추적합니다.
 
 ```bash
@@ -70,7 +83,7 @@ calljet callers process_data --verified-only
 
 ---
 
-### 2. `callees` — 순방향 피호출자 탐색
+### 3. `callees` — 순방향 피호출자 탐색
 특정 함수/심볼 내부에서 호출하는 하위 함수 체인을 온디맨드로 순방향 추적합니다.
 
 ```bash
@@ -85,7 +98,7 @@ calljet callees "App::Controller::handle_request"
 
 ---
 
-### 3. `path` — 최단 호출 경로 탐색
+### 4. `path` — 최단 호출 경로 탐색
 시작 심볼(`source`)에서 도착 심볼(`target`)까지의 구체적인 호출 경로(Call Path)를 도출합니다.
 
 ```bash
@@ -100,7 +113,7 @@ calljet path main calculate_checksum --max-depth 5
 
 ---
 
-### 4. `explain` — 단일 호출 엣지 상세 검증 및 근거
+### 5. `explain` — 단일 호출 엣지 상세 검증 및 근거
 호출자(`caller`)와 피호출자(`callee`) 사이의 호출 엣지가 존재하는 이유와 Clang 시맨틱 검증 근거를 상세 출력합니다.
 
 ```bash

@@ -56,7 +56,7 @@ fn test_clang_provider_tu_caching_invariant() {
     assert!(!foo_cands.is_empty());
 
     // 1. Symbol resolution 시도 (첫 TU 파싱)
-    let res = provider.resolve_symbols(&project, foo_cands);
+    let res = provider.resolve_symbols(&project, &discovery, foo_cands);
     assert!(!res.symbols.is_empty(), "foo 심볼이 해석되어야 함");
 
     let initial_parse_count = provider.tu_parse_count;
@@ -80,7 +80,7 @@ fn test_clang_provider_tu_caching_invariant() {
         calls: all_calls,
     };
 
-    let verify_res = provider.verify_calls(&project, batch);
+    let verify_res = provider.verify_calls(&project, &discovery, batch);
     assert!(!verify_res.edges.is_empty(), "호출 엣지가 검증되어야 함");
 
     // 핵심 불변식: TU 파싱 횟수가 증가하지 않고 캐시가 사용되어야 함 (FR-045, NFR-001)

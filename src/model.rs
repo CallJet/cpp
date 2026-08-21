@@ -463,6 +463,12 @@ impl SymbolQuery {
 /// CLI 쿼리 요청 종류 (Query Request)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum QueryRequest {
+    /// 단일 대상까지 도달하는 호출 경로 자동 탐색 (Trace)
+    Trace {
+        target: SymbolQuery,
+        max_depth: Option<usize>,
+        verified_only: bool,
+    },
     /// 호출자 탐색 (Callers)
     Callers {
         target: SymbolQuery,

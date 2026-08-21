@@ -73,24 +73,50 @@ impl ProjectContext {
 
         // 1. 컴파일 데이터베이스에 등록된 소스 파일 추가
         for file in self.compilation_db.all_source_files() {
-            if file.starts_with(&self.source_root) || file.exists() {
+            if file.starts_with(&self.source_root) && file.is_file() {
                 files.insert(file);
             }
         }
 
         // 2. 소스 루트 디렉토리 순회하여 C/C++ 확장자 파일 검색
+        // 디렉토리 심볼릭 링크를 따라가면 루트 재진입/외부 디렉토리 이탈로
+        // 순회량이 무한히 증가할 수 있으므로 실제 디렉토리만 방문한다.
+        let mut visited_dirs = BTreeSet::new();
         let mut stack = vec![self.source_root.clone()];
         while let Some(dir) = stack.pop() {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
+            let canonical_dir = match fs::canonicalize(&dir) {
+                Ok(path) if path.starts_with(&self.source_root) => path,
+                _ => continue,
+            };
+
+            if !visited_dirs.insert(canonical_dir.clone()) {
+                continue;
+            }
+
+            let entries = match fs::read_dir(&canonical_dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            for entry in entries.flatten() {
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+
+                if file_type.is_symlink() {
+                    continue;
+                }
+
+                if file_type.is_dir() {
+                    if !is_ignored_directory(&path) {
                         stack.push(path);
-                    } else if is_c_cpp_file(&path) {
-                        if let Ok(canonical) = fs::canonicalize(&path) {
+                    }
+                } else if file_type.is_file() && is_c_cpp_file(&path) {
+                    if let Ok(canonical) = fs::canonicalize(&path) {
+                        if canonical.starts_with(&self.source_root) {
                             files.insert(canonical);
-                        } else {
-                            files.insert(path);
                         }
                     }
                 }
@@ -99,6 +125,18 @@ impl ProjectContext {
 
         files.into_iter().collect()
     }
+}
+
+/// 후보 탐색 가치가 없고 파일 수가 매우 큰 도구/빌드 캐시 디렉토리인지 확인
+fn is_ignored_directory(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        ".git" | ".hg" | ".svn" | ".cache" | "node_modules" | "target"
+    )
 }
 
 /// 파일이 C/C++ 소스 또는 헤더 파일인지 확인

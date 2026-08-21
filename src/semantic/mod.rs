@@ -4,6 +4,7 @@
 pub mod clang;
 
 use crate::diagnostic::AnalysisIssue;
+use crate::discovery::DiscoveryIndex;
 use crate::model::{CallEdge, CandidateCallId, CandidateSymbolId, CompilationKey, Symbol};
 use crate::project::ProjectContext;
 
@@ -30,6 +31,8 @@ pub struct VerificationBatch {
 /// 엣지 검증 결과 (Verification Result)
 #[derive(Debug, Clone, Default)]
 pub struct VerificationResult {
+    /// 검증된 엣지의 호출자/피호출자 심볼 메타데이터
+    pub symbols: Vec<Symbol>,
     /// 검증된 엣지 목록
     pub edges: Vec<CallEdge>,
     /// 발생한 분석 이슈 목록
@@ -42,6 +45,7 @@ pub trait SemanticProvider {
     fn resolve_symbols(
         &mut self,
         project: &ProjectContext,
+        discovery: &DiscoveryIndex,
         candidates: &[CandidateSymbolId],
     ) -> ResolutionBatch;
 
@@ -49,6 +53,7 @@ pub trait SemanticProvider {
     fn verify_calls(
         &mut self,
         project: &ProjectContext,
+        discovery: &DiscoveryIndex,
         batch: VerificationBatch,
     ) -> VerificationResult;
 }

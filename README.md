@@ -16,10 +16,11 @@
 
 ## 📌 Core Principle
 
-Traditional static analysis tools parse the entire codebase with a compiler front-end (such as Clang), often taking minutes to tens of minutes just to answer a focused question. CallJet solves this with a **two-phase hybrid demand-driven pipeline**:
+Traditional static analysis tools parse the entire codebase with a compiler front-end (such as Clang), often taking minutes to tens of minutes just to answer a focused question. CallJet solves this with a **three-step demand-driven pipeline**:
 
-1. **Tree-sitter Fast Candidate Discovery**: Syntactically scans the entire project in milliseconds to extract candidate call sites, declarations, definitions, and reverse lookup indexes (`calls_by_spelling`).
-2. **Clang Demand-Driven Semantic Verification**: Leverages `libclang` C FFI to semantically verify **only the specific Translation Units (TUs) required along the query's active traversal frontier**.
+1. **Text Prefilter**: Searches for the requested symbol spelling and extracts only files that can contain a relevant declaration or call.
+2. **Lazy Tree-sitter Discovery**: Parses only those matched files, then reuses their candidate symbols and call sites as traversal expands. It does not build a project-wide AST index at startup.
+3. **Clang Demand-Driven Semantic Verification**: Uses `libclang` to verify **only the compilation contexts connected to the active candidates**. A missing context never falls back to scanning every entry in `compile_commands.json`.
 
 ---
 
@@ -53,9 +54,21 @@ cargo build --release
 
 ## 💻 CLI Usage Guide
 
-CallJet provides 4 core query commands.
+For the common case, pass one method to `trace`. The lower-level commands remain available for directional and two-endpoint queries.
 
-### 1. `callers` — Reverse Caller Traversal
+### 1. `trace` — One-method Call Path
+Finds verified paths from discovered top-level callers to one target method.
+
+```bash
+calljet trace <METHOD> [OPTIONS]
+
+# Example: Show how execution reaches Controller::dispatch
+calljet trace "Controller::dispatch" --root . --compile-commands build/compile_commands.json
+```
+
+---
+
+### 2. `callers` — Reverse Caller Traversal
 Finds all callers that lead to a specific target function/symbol on demand.
 
 ```bash
@@ -73,7 +86,7 @@ calljet callers process_data --verified-only
 
 ---
 
-### 2. `callees` — Forward Callee Traversal
+### 3. `callees` — Forward Callee Traversal
 Finds all downstream functions invoked from a given source function/symbol on demand.
 
 ```bash
@@ -88,7 +101,7 @@ calljet callees "App::Controller::handle_request"
 
 ---
 
-### 3. `path` — Shortest Call Path Discovery
+### 4. `path` — Shortest Call Path Discovery
 Finds the shortest call path from a `<source>` symbol to a `<target>` symbol.
 
 ```bash
@@ -103,7 +116,7 @@ calljet path main calculate_checksum --max-depth 5
 
 ---
 
-### 4. `explain` — Call Edge Evidence Explanation
+### 5. `explain` — Call Edge Evidence Explanation
 Inspects the semantic verification evidence between a `<caller>` and a `<callee>`.
 
 ```bash

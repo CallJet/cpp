@@ -203,50 +203,60 @@ impl SemanticProvider for ClangProvider {
     fn resolve_symbols(
         &mut self,
         project: &ProjectContext,
+        discovery: &crate::discovery::DiscoveryIndex,
         candidates: &[CandidateSymbolId],
     ) -> ResolutionBatch {
         let mut result = ResolutionBatch::default();
-        let discovery = &project.compilation_db;
 
         for &cand_id in candidates {
-            // 후보 심볼의 소스 파일 컨텍스트 매핑
-            let all_contexts = project.compilation_db.all_source_files();
+            let Some(candidate) = discovery.symbols.get(&cand_id) else {
+                continue;
+            };
+
+            // 후보가 발견된 소스/헤더와 직접 연관된 컨텍스트만 우선 시도한다.
+            let context_keys = discovery.contexts_for_symbol(cand_id, project);
+            let contexts = context_keys
+                .iter()
+                .filter_map(|key| project.compilation_db.context_by_key(key))
+                .collect::<Vec<_>>();
+
+            // 관련 컨텍스트를 찾지 못했다고 전체 compile_commands를 순회하지 않는다.
+            // QueryEngine은 이 경우 Tree-sitter 후보를 임시 심볼로 보존한다.
+            if contexts.is_empty() {
+                continue;
+            }
+
             let mut resolved_symbol = None;
 
-            for file in &all_contexts {
-                for ctx in discovery.contexts_for_source(file) {
-                    if let Some(cached) = self.symbol_cache.get(&(cand_id, ctx.key.clone())) {
-                        if let Some(sym) = cached {
-                            resolved_symbol = Some(sym.clone());
-                            break;
-                        }
-                        continue;
+            for ctx in contexts {
+                if let Some(cached) = self.symbol_cache.get(&(cand_id, ctx.key.clone())) {
+                    if let Some(sym) = cached {
+                        resolved_symbol = Some(sym.clone());
+                        break;
                     }
-
-                    match self.get_or_parse_tu(ctx) {
-                        Ok(tu) => {
-                            if let Some(sym) = self.resolve_symbol_in_tu(tu, cand_id, project) {
-                                self.symbol_cache
-                                    .insert((cand_id, ctx.key.clone()), Some(sym.clone()));
-                                resolved_symbol = Some(sym);
-                                break;
-                            } else {
-                                self.symbol_cache.insert((cand_id, ctx.key.clone()), None);
-                            }
-                        }
-                        Err(err) => {
-                            result.issues.push(AnalysisIssue {
-                                severity: Severity::Recoverable,
-                                context: Some(ctx.key.clone()),
-                                location: None,
-                                message: err,
-                                cause: AnalysisCause::TranslationUnitParseFailed,
-                            });
-                        }
-                    }
+                    continue;
                 }
-                if resolved_symbol.is_some() {
-                    break;
+
+                match self.get_or_parse_tu(ctx) {
+                    Ok(tu) => {
+                        if let Some(sym) = self.resolve_symbol_with_cand(tu, candidate) {
+                            self.symbol_cache
+                                .insert((cand_id, ctx.key.clone()), Some(sym.clone()));
+                            resolved_symbol = Some(sym);
+                            break;
+                        } else {
+                            self.symbol_cache.insert((cand_id, ctx.key.clone()), None);
+                        }
+                    }
+                    Err(err) => {
+                        result.issues.push(AnalysisIssue {
+                            severity: Severity::Recoverable,
+                            context: Some(ctx.key.clone()),
+                            location: None,
+                            message: err,
+                            cause: AnalysisCause::TranslationUnitParseFailed,
+                        });
+                    }
                 }
             }
 
@@ -263,26 +273,14 @@ impl SemanticProvider for ClangProvider {
     fn verify_calls(
         &mut self,
         project: &ProjectContext,
+        discovery: &crate::discovery::DiscoveryIndex,
         batch: VerificationBatch,
     ) -> VerificationResult {
         let mut result = VerificationResult::default();
 
         // 1. 해당 CompilationKey에 해당하는 CompilationContext 찾기
-        let mut target_context = None;
-        for file in project.compilation_db.all_source_files() {
-            for ctx in project.compilation_db.contexts_for_source(&file) {
-                if ctx.key == batch.context {
-                    target_context = Some(ctx.clone());
-                    break;
-                }
-            }
-            if target_context.is_some() {
-                break;
-            }
-        }
-
-        let context = match target_context {
-            Some(c) => c,
+        let context = match project.compilation_db.context_by_key(&batch.context) {
+            Some(context) => context.clone(),
             None => {
                 result.issues.push(AnalysisIssue {
                     severity: Severity::Recoverable,
@@ -310,12 +308,17 @@ impl SemanticProvider for ClangProvider {
             }
         };
 
-        // 3. 배치 내 각 후보 호출 검증
-        let discovery = crate::discovery::DiscoveryIndex::build(project);
-
+        // 3. 배치 내 각 후보 호출 검증. 최초 구축한 discovery 인덱스를 재사용한다.
         for call_id in batch.calls {
             if let Some(call_site) = discovery.calls.get(&call_id) {
-                if let Some(edge) = self.verify_single_call(tu, call_site, &context, &discovery) {
+                if let Some((edge, caller, callee)) =
+                    self.verify_single_call(tu, call_site, &context, discovery)
+                {
+                    for symbol in std::iter::once(caller).chain(callee) {
+                        if !result.symbols.iter().any(|item| item.id == symbol.id) {
+                            result.symbols.push(symbol);
+                        }
+                    }
                     result.edges.push(edge);
                 }
             }
@@ -362,18 +365,6 @@ impl ClangProvider {
 
             self.cursor_to_symbol(cursor_to_use, cand.language)
         }
-    }
-
-    /// TU 내에서 특정 후보 심볼 ID를 Clang 커서로 찾아 canonical Symbol 생성
-    fn resolve_symbol_in_tu(
-        &self,
-        tu: CXTranslationUnit,
-        cand_id: CandidateSymbolId,
-        project: &ProjectContext,
-    ) -> Option<Symbol> {
-        let discovery = crate::discovery::DiscoveryIndex::build(project);
-        let cand = discovery.symbols.get(&cand_id)?;
-        self.resolve_symbol_with_cand(tu, cand)
     }
 
     /// Clang 커서로부터 정규화된 Symbol 데이터 구조 생성
@@ -430,7 +421,7 @@ impl ClangProvider {
         call_site: &crate::model::CandidateCallSite,
         context: &CompilationContext,
         discovery: &crate::discovery::DiscoveryIndex,
-    ) -> Option<CallEdge> {
+    ) -> Option<(CallEdge, Symbol, Option<Symbol>)> {
         let file_path = &call_site.expression.start.file;
         let c_file = CString::new(file_path.to_str()?).ok()?;
         let point = call_site
@@ -504,8 +495,8 @@ impl ClangProvider {
             let evidence = VerificationEvidence {
                 expression_text: call_site.expression_text.clone(),
                 static_target: callee_sym.clone(),
-                candidate_targets: if let Some(s) = callee_sym {
-                    vec![s]
+                candidate_targets: if let Some(s) = &callee_sym {
+                    vec![s.clone()]
                 } else {
                     Vec::new()
                 },
@@ -522,16 +513,18 @@ impl ClangProvider {
             let edge_id = CallEdgeId(self.next_edge_id);
             self.next_edge_id += 1;
 
-            Some(CallEdge {
+            let edge = CallEdge {
                 id: edge_id,
-                caller: caller_sym.id,
+                caller: caller_sym.id.clone(),
                 callee: callee_id,
                 callsite: call_site.expression.clone(),
                 kind,
                 confidence,
                 contexts: contexts_set,
                 evidence_by_context: evidence_map,
-            })
+            };
+
+            Some((edge, caller_sym, callee_sym))
         }
     }
 
