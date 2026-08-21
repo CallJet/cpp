@@ -21,7 +21,6 @@ static INIT_CLANG: Once = Once::new();
 
 /// libclang 초기화 헬퍼
 pub fn ensure_libclang_loaded() -> bool {
-    let mut success = true;
     INIT_CLANG.call_once(|| {
         if !clang_sys::is_loaded() && clang_sys::load().is_err() {
             // 운영체제별 표준 LLVM / libclang 기본 경로 목록
@@ -45,19 +44,14 @@ pub fn ensure_libclang_loaded() -> bool {
                 "/usr/lib",
                 "/usr/local/lib",
             ];
-            let mut loaded = false;
             for p in possible_paths {
                 let path = Path::new(p);
                 if path.exists() {
                     std::env::set_var("LIBCLANG_PATH", path);
                     if clang_sys::load().is_ok() {
-                        loaded = true;
                         break;
                     }
                 }
-            }
-            if !loaded {
-                success = false;
             }
         }
     });
@@ -319,24 +313,19 @@ impl SemanticProvider for ClangProvider {
         // 3. 배치 내 각 후보 호출 검증. 최초 구축한 discovery 인덱스를 재사용한다.
         for call_id in batch.calls {
             if let Some(call_site) = discovery.calls.get(&call_id) {
-                if let Some((edge, caller, callee)) =
-                    self.verify_single_call(
-                        project,
-                        tu,
-                        call_site,
-                        &context,
-                        discovery,
-                        &target_candidates,
-                    )
-                {
+                if let Some((edge, caller, callee)) = self.verify_single_call(
+                    project,
+                    tu,
+                    call_site,
+                    &context,
+                    discovery,
+                    &target_candidates,
+                ) {
                     let family_symbols = edge
                         .evidence_by_context
                         .values()
                         .flat_map(|evidence| evidence.candidate_targets.iter().cloned());
-                    for symbol in std::iter::once(caller)
-                        .chain(callee)
-                        .chain(family_symbols)
-                    {
+                    for symbol in std::iter::once(caller).chain(callee).chain(family_symbols) {
                         if !result.symbols.iter().any(|item| item.id == symbol.id) {
                             result.symbols.push(symbol);
                         }
@@ -484,12 +473,8 @@ impl ClangProvider {
             .as_ref()
             .and_then(|location| location.point)
             .or_else(|| callee_spelling_point(call_site))?;
-        let member_location = clang_getLocation(
-            tu,
-            cx_file,
-            member_point.line,
-            member_point.column,
-        );
+        let member_location =
+            clang_getLocation(tu, cx_file, member_point.line, member_point.column);
         let member_cursor = clang_getCursor(tu, member_location);
         if clang_Cursor_isNull(member_cursor) != 0 {
             return None;
@@ -538,12 +523,10 @@ impl ClangProvider {
     fn override_family_symbols(
         &mut self,
         project: &ProjectContext,
-        current_tu: CXTranslationUnit,
         current_context: &CompilationContext,
         reference: CXCursor,
         static_target: &Symbol,
         discovery: &crate::discovery::DiscoveryIndex,
-        expected_name: &str,
         target_candidates: &[CandidateSymbolId],
     ) -> Vec<Symbol> {
         let mut target_key = target_candidates.to_vec();
@@ -574,13 +557,13 @@ impl ClangProvider {
             discovery
                 .symbols
                 .values()
-                .filter(|candidate| candidate.name == expected_name)
+                .filter(|candidate| candidate.name == static_target.name)
                 .collect::<Vec<_>>()
         } else {
             target_key
                 .iter()
                 .filter_map(|id| discovery.symbols.get(id))
-                .filter(|candidate| candidate.name == expected_name)
+                .filter(|candidate| candidate.name == static_target.name)
                 .collect::<Vec<_>>()
         };
 
@@ -593,16 +576,11 @@ impl ClangProvider {
             }
 
             for key in context_keys {
-                let candidate_tu = if key == current_context.key {
-                    current_tu
-                } else {
-                    let Some(context) = project.compilation_db.context_by_key(&key) else {
-                        continue;
-                    };
-                    let Ok(tu) = self.get_or_parse_tu(context) else {
-                        continue;
-                    };
-                    tu
+                let Some(context) = project.compilation_db.context_by_key(&key) else {
+                    continue;
+                };
+                let Ok(candidate_tu) = self.get_or_parse_tu(context) else {
+                    continue;
                 };
 
                 let Some(candidate_cursor) = self.cursor_with_cand(candidate_tu, candidate) else {
@@ -617,9 +595,8 @@ impl ClangProvider {
                 let Some(candidate_symbol) = candidate_symbol else {
                     continue;
                 };
-                let candidate_chain = unsafe {
-                    self.override_chain_symbols(candidate_cursor, candidate.language)
-                };
+                let candidate_chain =
+                    unsafe { self.override_chain_symbols(candidate_cursor, candidate.language) };
                 let is_ancestor = reference_ids.contains(&candidate_symbol.id);
                 let is_descendant = candidate_chain
                     .iter()
@@ -639,11 +616,7 @@ impl ClangProvider {
     }
 
     /// 한 메서드와 재귀적인 override 조상 커서를 안정적인 심볼로 변환한다.
-    unsafe fn override_chain_symbols(
-        &self,
-        cursor: CXCursor,
-        language: Language,
-    ) -> Vec<Symbol> {
+    unsafe fn override_chain_symbols(&self, cursor: CXCursor, language: Language) -> Vec<Symbol> {
         let mut cursors = Vec::new();
         collect_override_chain(cursor, &mut cursors);
 
@@ -725,12 +698,7 @@ impl ClangProvider {
                 } else {
                     VerificationReason::CursorNotFound
                 };
-                (
-                    None,
-                    CallKind::Unresolved,
-                    Confidence::Unresolved,
-                    reason,
-                )
+                (None, CallKind::Unresolved, Confidence::Unresolved, reason)
             };
 
             let callee_id = callee_sym.as_ref().map(|s| s.id.clone());
@@ -738,12 +706,10 @@ impl ClangProvider {
                 if let Some(static_target) = &callee_sym {
                     self.override_family_symbols(
                         project,
-                        tu,
                         context,
                         canonical_ref,
                         static_target,
                         discovery,
-                        &call_site.callee_spelling,
                         target_candidates,
                     )
                 } else {
@@ -886,9 +852,7 @@ impl ClangProvider {
 }
 
 /// Tree-sitter 호출식 원문에서 피호출자 단말 이름의 1-based 위치를 계산한다.
-fn callee_spelling_point(
-    call_site: &crate::model::CandidateCallSite,
-) -> Option<LineColumn> {
+fn callee_spelling_point(call_site: &crate::model::CandidateCallSite) -> Option<LineColumn> {
     let start = call_site.expression.start.point?;
     let expression = call_site.expression_text.as_deref()?;
     let callable_part = expression

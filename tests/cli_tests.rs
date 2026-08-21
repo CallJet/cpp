@@ -11,14 +11,8 @@ use tempfile::tempdir;
 
 #[test]
 fn test_cli_trace_parsing() {
-    let cli = Cli::try_parse_from([
-        "calljet",
-        "trace",
-        "ns::Class::method",
-        "--max-depth",
-        "8",
-    ])
-    .unwrap();
+    let cli =
+        Cli::try_parse_from(["calljet", "trace", "ns::Class::method", "--max-depth", "8"]).unwrap();
 
     let (_, req) = cli.into_request().unwrap();
     if let QueryRequest::Trace {
@@ -171,21 +165,14 @@ fn test_cli_verbosity_count_and_long_option_compatibility() {
     let (_, _, repeated_options) = repeated.into_execution_plan().unwrap();
     assert_eq!(repeated_options.verbosity, 2);
 
-    let long =
-        Cli::try_parse_from(["calljet", "callers", "target_fn", "--verbose"]).unwrap();
+    let long = Cli::try_parse_from(["calljet", "callers", "target_fn", "--verbose"]).unwrap();
     let (_, _, long_options) = long.into_execution_plan().unwrap();
     assert_eq!(long_options.verbosity, 1);
 }
 
 #[test]
 fn test_cli_progress_does_not_enable_verbose_result_output() {
-    let cli = Cli::try_parse_from([
-        "calljet",
-        "trace",
-        "target_fn",
-        "--progress",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["calljet", "trace", "target_fn", "--progress"]).unwrap();
     let (_, _, options) = cli.into_execution_plan().unwrap();
 
     assert!(options.progress);

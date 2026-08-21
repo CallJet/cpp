@@ -53,15 +53,17 @@ impl ProjectContext {
             Ok(database) => database,
             Err(error) => {
                 let mut database = CompilationDb::default();
-                database.diagnostics.push(Diagnostic::analysis(AnalysisIssue {
-                    severity: Severity::Recoverable,
-                    context: None,
-                    location: None,
-                    message: format!(
-                        "{error}; Clang 검증 없이 Tree-sitter 후보 분석을 계속합니다."
-                    ),
-                    cause: AnalysisCause::MissingCompilationContext,
-                }));
+                database
+                    .diagnostics
+                    .push(Diagnostic::analysis(AnalysisIssue {
+                        severity: Severity::Recoverable,
+                        context: None,
+                        location: None,
+                        message: format!(
+                            "{error}; Clang 검증 없이 Tree-sitter 후보 분석을 계속합니다."
+                        ),
+                        cause: AnalysisCause::MissingCompilationContext,
+                    }));
                 database
             }
         };

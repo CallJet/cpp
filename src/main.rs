@@ -85,7 +85,10 @@ fn main() {
 
     if let Some(path) = output_file {
         if let Err(e) = std::fs::write(&path, &rendered.stdout) {
-            eprintln!("[CallJet] failed to write output ('{}'): {e}", path.display());
+            eprintln!(
+                "[CallJet] failed to write output ('{}'): {e}",
+                path.display()
+            );
             process::exit(1);
         }
     } else if !rendered.stdout.is_empty() {

@@ -64,7 +64,10 @@ fn test_project_context_continues_without_compilation_database() {
                 )
         )
     }));
-    assert_eq!(project.source_files(), vec![fs::canonicalize(source_file).unwrap()]);
+    assert_eq!(
+        project.source_files(),
+        vec![fs::canonicalize(source_file).unwrap()]
+    );
 }
 
 #[test]

@@ -353,7 +353,10 @@ fn test_query_discovery_parses_only_text_prefilter_matches() {
 
     assert_eq!(index.source_files_inspected, 3);
     assert_eq!(index.source_files.len(), 1);
-    assert_eq!(index.source_files[0], fs::canonicalize(target_file).unwrap());
+    assert_eq!(
+        index.source_files[0],
+        fs::canonicalize(target_file).unwrap()
+    );
     assert_eq!(index.matching_symbols(&query).len(), 1);
 }
 

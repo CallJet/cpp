@@ -351,9 +351,9 @@ fn test_text_output_separates_directory_namespace_class_and_function() {
         },
     );
 
-    assert!(rendered.stdout.contains(
-        "Relation #1: App::Controller::run -> App::Service::target [CONFIRMED]"
-    ));
+    assert!(rendered
+        .stdout
+        .contains("Relation #1: App::Controller::run -> App::Service::target [CONFIRMED]"));
     assert!(rendered.stdout.contains("Directory : src"));
     assert!(rendered.stdout.contains("FullSymbol: App::Controller::run"));
     assert!(rendered.stdout.contains("Namespace : App"));

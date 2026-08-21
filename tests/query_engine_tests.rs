@@ -15,9 +15,7 @@ use calljet::model::{
 use calljet::project::ProjectContext;
 use calljet::query::QueryEngine;
 use calljet::semantic::clang::{ensure_libclang_loaded, ClangProvider};
-use calljet::semantic::{
-    ResolutionBatch, SemanticProvider, VerificationBatch, VerificationResult,
-};
+use calljet::semantic::{ResolutionBatch, SemanticProvider, VerificationBatch, VerificationResult};
 
 #[derive(Default)]
 struct UnavailableSemanticProvider;
@@ -125,7 +123,11 @@ impl SemanticProvider for ResolutionUnavailableButVerificationAvailable {
             let caller = candidate_as_clang_symbol(caller_candidate);
             let callee = candidate_as_clang_symbol(callee_candidate);
             for symbol in [caller.clone(), callee.clone()] {
-                if !result.symbols.iter().any(|existing| existing.id == symbol.id) {
+                if !result
+                    .symbols
+                    .iter()
+                    .any(|existing| existing.id == symbol.id)
+                {
                     result.symbols.push(symbol);
                 }
             }
@@ -264,10 +266,7 @@ fn candidate_as_clang_symbol(candidate: &CandidateSymbol) -> Symbol {
         .map(|qualifier| format!("{qualifier}{}", candidate.name))
         .unwrap_or_else(|| candidate.name.clone());
     Symbol {
-        id: SymbolId::clang_usr(
-            candidate.language,
-            format!("test:clang:{qualified_name}"),
-        ),
+        id: SymbolId::clang_usr(candidate.language, format!("test:clang:{qualified_name}")),
         name: candidate.name.clone(),
         qualified_name: Some(qualified_name),
         namespace: None,
@@ -480,6 +479,61 @@ fn test_query_engine_explain() {
 }
 
 #[test]
+fn test_explain_skips_same_named_caller_in_unrelated_tu() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("a.cpp"),
+        "namespace A { void target() {} void caller() { target(); } }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("b.cpp"),
+        "namespace B { void other() {} void caller() { other(); } }\n",
+    )
+    .unwrap();
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([
+            {
+                "directory": root.to_str().unwrap(),
+                "file": "a.cpp",
+                "command": "clang++ -c a.cpp"
+            },
+            {
+                "directory": root.to_str().unwrap(),
+                "file": "b.cpp",
+                "command": "clang++ -c b.cpp"
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let mut engine = QueryEngine::new(&project, ClangProvider::new());
+    let result = engine
+        .execute(QueryRequest::Explain {
+            caller: SymbolQuery::parse("A::caller"),
+            callee: SymbolQuery::parse("A::target"),
+        })
+        .unwrap();
+
+    assert_eq!(result.completion, Completion::Complete);
+    assert_eq!(result.edges.len(), 1);
+    assert_eq!(engine.provider.tu_parse_count, 1);
+}
+
+#[test]
 fn test_query_engine_rejects_inactive_preprocessor_symbol() {
     let dir = tempdir().unwrap();
     let root = dir.path();
@@ -643,9 +697,7 @@ fn test_virtual_call_and_trace_match_cross_tu_derived_override() {
         .map(|symbol| symbol.display_name().to_string())
         .collect::<Vec<_>>();
     assert!(candidate_names.iter().any(|name| name == "Base::target"));
-    assert!(candidate_names
-        .iter()
-        .any(|name| name == "Derived::target"));
+    assert!(candidate_names.iter().any(|name| name == "Derived::target"));
 
     let mut trace_engine = QueryEngine::new(&project, ClangProvider::new());
     let trace = trace_engine

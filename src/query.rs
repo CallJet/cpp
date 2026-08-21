@@ -117,7 +117,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
         *verified_batches += 1;
         attempted_tu_keys.insert(batch.context.clone());
-        if *verified_batches == 1 || *verified_batches % 25 == 0 {
+        if *verified_batches == 1 || (*verified_batches).is_multiple_of(25) {
             progress_log!(
                 self.progress,
                 "[CallJet] traversal/{progress_scope}: semantic batch {}, unique TU {}, {} call candidate(s)",
@@ -230,9 +230,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             }));
         }
 
-        let resolution =
-            self.provider
-                .resolve_symbols(self.project, &self.discovery, &cand_ids);
+        let resolution = self
+            .provider
+            .resolve_symbols(self.project, &self.discovery, &cand_ids);
         self.record_analysis_issues(resolution.issues.clone());
 
         if resolution.symbols.is_empty() {
@@ -249,8 +249,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let complete_candidates = cand_ids
                 .iter()
                 .filter_map(|id| self.discovery.symbols.get(id))
-                .cloned()
                 .filter(|candidate| candidate.syntax_complete)
+                .cloned()
                 .collect::<Vec<_>>();
             let definitions = complete_candidates
                 .iter()
@@ -458,15 +458,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         target: &Symbol,
     ) -> Option<CallEdge> {
         let call_id = calls.iter().copied().find(|call_id| {
-            self.discovery
-                .calls
-                .get(call_id)
-                .is_some_and(|call| {
-                    call.expression == unresolved_edge.callsite
-                        && call.syntax_complete
-                        && !matches!(call.syntax_hint, CandidateCallKind::Other)
-                        && call_may_target_symbol(call, target)
-                })
+            self.discovery.calls.get(call_id).is_some_and(|call| {
+                call.expression == unresolved_edge.callsite
+                    && call.syntax_complete
+                    && !matches!(call.syntax_hint, CandidateCallKind::Other)
+                    && call_may_target_symbol(call, target)
+            })
         })?;
 
         let (mut recovered, _, _) = self
@@ -613,17 +610,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                 let mut edges_to_consider = Vec::new();
                 for edge in ver_res.edges {
-                    let targetless_unresolved = edge.callee.is_none()
-                        && edge.confidence == Confidence::Unresolved;
+                    let targetless_unresolved =
+                        edge.callee.is_none() && edge.confidence == Confidence::Unresolved;
                     if !verified_only && targetless_unresolved {
                         let caller = symbols_map.get(&edge.caller).cloned();
                         if let Some(recovered) = caller.as_ref().and_then(|caller| {
-                            self.recover_unresolved_reverse_edge(
-                                &calls,
-                                &edge,
-                                caller,
-                                &cur_sym,
-                            )
+                            self.recover_unresolved_reverse_edge(&calls, &edge, caller, &cur_sym)
                         }) {
                             edges_to_consider.push(recovered);
                             continue;
@@ -640,20 +632,18 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                     // 피호출자가 현재 심볼과 매칭되는지 확인
                     let targets_current = edge_targets_symbol(&edge, &cur_sym, &symbols_map);
-                    let unresolved_candidate = edge.callee.is_none()
-                        && edge.confidence == Confidence::Unresolved;
+                    let unresolved_candidate =
+                        edge.callee.is_none() && edge.confidence == Confidence::Unresolved;
                     // 복구되지 않은 targetless unresolved 결과는 callers의
                     // 1-hop 근거로만 유지한다. 현재 피호출자와 연결할 구문
                     // 근거도 없으므로 trace나 역방향 프론티어에는 넣지 않는다.
-                    let matches_callee =
-                        targets_current || (!trace_mode && unresolved_candidate);
+                    let matches_callee = targets_current || (!trace_mode && unresolved_candidate);
 
                     if matches_callee {
                         // 정적 참조가 base virtual 메서드여도 요청 대상이 같은 override
                         // family라면 쿼리 결과 엣지는 실제 요청 대상으로 연결한다.
                         if targets_current
-                            && (edge.kind == CallKind::Virtual
-                                || is_tree_sitter_symbol(&cur_sym))
+                            && (edge.kind == CallKind::Virtual || is_tree_sitter_symbol(&cur_sym))
                             && edge.callee.as_ref() != Some(&item.symbol)
                         {
                             edge.callee = Some(item.symbol.clone());
@@ -852,9 +842,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     .unwrap_or(cur_sym.name.as_str()),
             );
             self.discovery.discover_query(self.project, &cur_query);
-            let cand_syms = self
-                .discovery
-                .matching_symbols(&cur_query);
+            let cand_syms = self.discovery.matching_symbols(&cur_query);
             let mut calls_to_verify = Vec::new();
             for &cand_id in cand_syms {
                 let calls = self.discovery.candidate_callees(cand_id);
@@ -1040,7 +1028,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         progress_log!(
             self.progress,
             "[CallJet] query/path: resolving '{}' -> '{}'...",
-            source_query.raw, target_query.raw
+            source_query.raw,
+            target_query.raw
         );
         let source_sym = self.resolve_endpoint(&source_query)?;
         let target_sym = self.resolve_endpoint(&target_query)?;
@@ -1133,9 +1122,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     .unwrap_or(cur_sym.name.as_str()),
             );
             self.discovery.discover_query(self.project, &cur_query);
-            let cand_syms = self
-                .discovery
-                .matching_symbols(&cur_query);
+            let cand_syms = self.discovery.matching_symbols(&cur_query);
             let mut calls_to_verify = Vec::new();
             for &cand_id in cand_syms {
                 let calls = self.discovery.candidate_callees(cand_id);
@@ -1241,11 +1228,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                         .get(&call_id)
                         .filter(|call| call_may_target_symbol(call, &target_sym))
                         .map(|_| &target_sym);
-                    for (edge, caller, callee) in self.fallback_edges_for_call(
-                        call_id,
-                        Some(&cur_sym),
-                        forced_target,
-                    ) {
+                    for (edge, caller, callee) in
+                        self.fallback_edges_for_call(call_id, Some(&cur_sym), forced_target)
+                    {
                         let edge_key = VerifiedEdgeKey {
                             caller: edge.caller.clone(),
                             callee: edge.callee.clone(),
@@ -1383,9 +1368,13 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         symbols_map.insert(callee_sym.id.clone(), callee_sym.clone());
 
         // caller 내부의 callee 호출 후보 검색
-        let cand_syms = self
-            .discovery
-            .matching_symbols(&SymbolQuery::parse(&caller_sym.name));
+        let caller_query = SymbolQuery::parse(
+            caller_sym
+                .qualified_name
+                .as_deref()
+                .unwrap_or(caller_sym.name.as_str()),
+        );
+        let cand_syms = self.discovery.matching_symbols(&caller_query);
         let mut calls_to_verify = Vec::new();
         for &cand_id in cand_syms {
             let calls = self.discovery.candidate_callees(cand_id);
@@ -1417,9 +1406,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 symbols: target_candidates.clone(),
                 calls: calls.clone(),
             };
-            let ver_res =
-                self.provider
-                    .verify_calls(self.project, &self.discovery, batch);
+            let ver_res = self
+                .provider
+                .verify_calls(self.project, &self.discovery, batch);
             let context_checked = ver_res.context_checked;
             self.record_analysis_issues(ver_res.issues);
             if context_checked {
@@ -1448,11 +1437,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         }
 
         for call_id in fallback_calls {
-            for (edge, caller, callee) in self.fallback_edges_for_call(
-                call_id,
-                Some(&caller_sym),
-                Some(&callee_sym),
-            ) {
+            for (edge, caller, callee) in
+                self.fallback_edges_for_call(call_id, Some(&caller_sym), Some(&callee_sym))
+            {
                 symbols_map.entry(caller.id.clone()).or_insert(caller);
                 if let Some(callee) = callee {
                     symbols_map.entry(callee.id.clone()).or_insert(callee);
@@ -1594,10 +1581,7 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
         next.retain(|(callee, _)| seen.insert(callee.clone()));
     }
 
-    let mut roots = callers
-        .difference(&callees)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut roots = callers.difference(&callees).cloned().collect::<Vec<_>>();
     roots.sort_by(|left, right| {
         first_callsites
             .get(left)
@@ -1676,10 +1660,7 @@ fn shortest_path(
 }
 
 /// 시맨틱 검증으로 얻은 caller/callee 메타데이터를 결과 심볼 맵에 병합
-fn record_verified_symbols(
-    symbols_map: &mut BTreeMap<SymbolId, Symbol>,
-    symbols: Vec<Symbol>,
-) {
+fn record_verified_symbols(symbols_map: &mut BTreeMap<SymbolId, Symbol>, symbols: Vec<Symbol>) {
     for symbol in symbols {
         symbols_map.entry(symbol.id.clone()).or_insert(symbol);
     }
@@ -1772,10 +1753,7 @@ fn symbols_match_syntactically(left: &Symbol, right: &Symbol) -> bool {
         return false;
     }
 
-    match (
-        meaningful_qualifier(left),
-        meaningful_qualifier(right),
-    ) {
+    match (meaningful_qualifier(left), meaningful_qualifier(right)) {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
