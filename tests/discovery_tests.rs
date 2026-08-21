@@ -94,6 +94,8 @@ fn test_discovery_c_plain_functions_and_calls() {
         id: SymbolId::clang_usr(Language::C, "c:@F@callee_func"),
         name: "callee_func".to_string(),
         qualified_name: None,
+        namespace: None,
+        class_name: None,
         signature: None,
         declaration: None,
         definition: None,
@@ -178,6 +180,11 @@ fn test_discovery_cpp_namespaces_classes_and_methods() {
     let launch_candidates = index.matching_symbols(&query_launch);
     assert!(!launch_candidates.is_empty());
     let launch_id = launch_candidates[0];
+    assert_eq!(
+        index.symbols.get(&launch_id).unwrap().syntactic_kind,
+        CandidateSymbolKind::Function,
+        "네임스페이스 내부 자유 함수는 메서드로 분류하면 안 됨"
+    );
 
     let launch_calls = index.candidate_callees(launch_id);
     let member_call = launch_calls
@@ -186,6 +193,14 @@ fn test_discovery_cpp_namespaces_classes_and_methods() {
         .find(|c| c.callee_spelling == "sendData")
         .expect("sendData 멤버 호출이 발견되어야 함");
     assert_eq!(member_call.syntax_hint, CandidateCallKind::Member);
+    let expression_point = member_call.expression.start.point.unwrap();
+    let callee_point = member_call
+        .callee_location
+        .as_ref()
+        .and_then(|location| location.point)
+        .expect("멤버 이름의 정확한 위치가 기록되어야 함");
+    assert_eq!(callee_point.line, expression_point.line);
+    assert!(callee_point.column > expression_point.column);
 }
 
 #[test]

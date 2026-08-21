@@ -8,7 +8,7 @@ use calljet::cli::ProjectInput;
 use calljet::model::{QueryRequest, SymbolQuery};
 use calljet::project::ProjectContext;
 use calljet::query::QueryEngine;
-use calljet::render::HumanRenderer;
+use calljet::render::{HumanRenderer, RenderOptions};
 use calljet::semantic::clang::{ensure_libclang_loaded, ClangProvider};
 
 #[test]
@@ -66,7 +66,8 @@ fn test_cli_output_renderer_callers_and_explain() {
     );
     assert!(rendered.stdout.contains("[CONFIRMED]"));
     assert!(rendered.stdout.contains("caller -> target"));
-    assert!(rendered.stdout.contains("상태: 분석 완료"));
+    assert!(!rendered.stdout.contains("상태: 분석 완료"));
+    assert!(!rendered.stdout.contains("Directory :"));
 
     // 2. explain 렌더링 검증
     let explain_res = engine
@@ -76,7 +77,14 @@ fn test_cli_output_renderer_callers_and_explain() {
         })
         .unwrap();
 
-    let rendered_explain = renderer.render(&project, &explain_res);
+    let rendered_explain = renderer.render_with_options(
+        &project,
+        &explain_res,
+        RenderOptions {
+            verbosity: 2,
+            ..RenderOptions::default()
+        },
+    );
     assert_eq!(rendered_explain.exit_code, 0);
     assert!(rendered_explain.stdout.contains("표현식: `target()`"));
     assert!(rendered_explain.stdout.contains("사유: ExactReference"));
@@ -132,4 +140,108 @@ fn test_cli_exit_code_on_truncated_and_no_result() {
         "NoResult는 정상 종료(exit code 0)이어야 함 (FR-070)"
     );
     assert!(rendered_no_result.stdout.contains("결과 없음 (No Result)"));
+}
+
+#[test]
+fn test_text_output_separates_directory_namespace_class_and_function() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let src_file = src_dir.join("member.cpp");
+    fs::write(
+        &src_file,
+        r#"
+        namespace App {
+            class Service {
+            public:
+                void target() {}
+            };
+
+            class Controller {
+            public:
+                void run(Service& service) {
+                    service.target();
+                }
+            };
+        }
+        "#,
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "src/member.cpp",
+            "command": "clang++ -std=c++17 -c src/member.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let provider = ClangProvider::new();
+    let mut engine = QueryEngine::new(&project, provider);
+    let result = engine
+        .execute(QueryRequest::Callees {
+            source: SymbolQuery::parse("App::Controller::run"),
+            max_depth: Some(1),
+            verified_only: false,
+        })
+        .unwrap();
+    let renderer = HumanRenderer::new();
+    let compact = renderer.render(&project, &result);
+
+    assert!(compact
+        .stdout
+        .contains("App::Controller::run -> App::Service::target [CONFIRMED]"));
+    assert!(!compact.stdout.contains("Directory :"));
+
+    let rendered = renderer.render_with_options(
+        &project,
+        &result,
+        RenderOptions {
+            verbosity: 1,
+            ..RenderOptions::default()
+        },
+    );
+
+    assert!(rendered.stdout.contains(
+        "Relation #1: App::Controller::run -> App::Service::target [CONFIRMED]"
+    ));
+    assert!(rendered.stdout.contains("Directory : src"));
+    assert!(rendered.stdout.contains("FullSymbol: App::Controller::run"));
+    assert!(rendered.stdout.contains("Namespace : App"));
+    assert!(rendered.stdout.contains("Class     : Controller"));
+    assert!(rendered.stdout.contains("Function  : run"));
+    assert!(rendered.stdout.contains("FullSymbol: App::Service::target"));
+    assert!(rendered.stdout.contains("Class     : Service"));
+    assert!(!rendered.stdout.contains("표현식:"));
+    assert!(!rendered.stdout.contains("[UNRESOLVED]"));
+
+    let very_verbose = renderer.render_with_options(
+        &project,
+        &result,
+        RenderOptions {
+            verbosity: 2,
+            ..RenderOptions::default()
+        },
+    );
+    assert!(very_verbose.stdout.contains("표현식: `service.target()`"));
+    assert!(very_verbose.stdout.contains("사유: ExactReference"));
+    assert!(very_verbose.stdout.contains("Contexts"));
+    assert!(very_verbose.stdout.contains("Evidence"));
+    assert!(very_verbose.stdout.contains("Spelling: src/member.cpp"));
+    assert!(very_verbose.stdout.contains("[상세 번역 단위(TU) 리포트]"));
+    assert!(very_verbose.stdout.contains("[성능 및 비용 지표"));
 }

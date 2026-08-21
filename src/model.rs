@@ -189,6 +189,8 @@ pub struct CandidateCallSite {
     pub caller: CandidateSymbolId,
     /// 피호출자 표기 문자열 (Callee Spelling)
     pub callee_spelling: String,
+    /// 피호출자 단말 이름의 정확한 소스 위치
+    pub callee_location: Option<SourceLocation>,
     /// 한정자 힌트 (Qualifier Hint)
     pub qualifier_hint: Option<String>,
     /// 호출 표현식 소스 범위 (Expression Range)
@@ -252,6 +254,12 @@ pub struct Symbol {
     pub name: String,
     /// 네임스페이스 및 소유자를 포함한 정규화된 이름 (Qualified Name)
     pub qualified_name: Option<String>,
+    /// 소속 네임스페이스 (`outer::inner` 형식)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// 소유 클래스/구조체 (`Outer::Inner` 형식)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
     /// 함수 시그니처 (Signature)
     pub signature: Option<String>,
     /// 선언 위치 (Declaration Location)

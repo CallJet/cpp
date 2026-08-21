@@ -141,7 +141,7 @@ calljet explain process_event dispatch
 | `--no-unresolved` | - | `false` | Exclude `[UNRESOLVED]` indirect edges from results |
 | `--no-foreign` | - | `false` | Exclude foreign external library boundary calls |
 | `--metrics` | - | `false` | Output detailed timing and performance metrics |
-| `--verbose` | - | `false` | Display detailed per-file Translation Unit (TU) breakdown report |
+| `--verbose` | `-v` | `0` | Increase text detail (`-v`: symbol hierarchy/callsite, `-vv`: evidence, contexts, TU report, and metrics) |
 | `--help` | `-h` | - | Display help information |
 
 ---
@@ -154,20 +154,13 @@ CallJet employs an honest **3-state Confidence Model**:
 * **`[POSSIBLE]`**: Valid candidate with multiple runtime targets (e.g. virtual method dispatch).
 * **`[UNRESOLVED]`**: Semantic call target could not be statically determined (e.g. indirect function pointer).
 
-### Example Output (`calljet callers c_leaf`)
+### Default Output (`calljet callers c_leaf`)
 ```text
-=== 호출 관계 (Call Edges) ===
-• [CONFIRMED] c_mid -> c_leaf (direct, at src/c_chain.c:3:16-24)
-    표현식: `c_leaf()`
-    사유: ExactReference, 컨텍스트: src/c_chain.c#0
-• [CONFIRMED] c_root -> c_mid (direct, at src/c_chain.c:4:17-24)
-    표현식: `c_mid()`
-    사유: ExactReference, 컨텍스트: src/c_chain.c#0
-
---- 분석 결과 요약 ---
-상태: 분석 완료 (Complete)
-통계: 총 심볼 3개, 확정 엣지(CONFIRMED) 2개, 가능 엣지(POSSIBLE) 0개, 미해결 엣지(UNRESOLVED) 0개
+c_mid -> c_leaf [CONFIRMED]
+c_root -> c_mid [CONFIRMED]
 ```
+
+Use `-v` to include `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, and callsites. Use `-vv` to additionally include semantic evidence, contexts, Translation Unit details, and performance metrics. The long-form `--verbose` remains equivalent to `-v`.
 
 ---
 

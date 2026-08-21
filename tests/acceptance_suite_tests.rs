@@ -8,7 +8,7 @@ use calljet::cli::ProjectInput;
 use calljet::model::{CallKind, Completion, Confidence, QueryRequest, SymbolQuery};
 use calljet::project::ProjectContext;
 use calljet::query::QueryEngine;
-use calljet::render::HumanRenderer;
+use calljet::render::{HumanRenderer, RenderOptions};
 use calljet::semantic::clang::{ensure_libclang_loaded, ClangProvider};
 
 /// 대표적인 acceptance 픽스처 프로젝트 생성 헬퍼
@@ -431,7 +431,14 @@ fn test_ac_014_source_location_reporting() {
         })
         .unwrap();
 
-    let rendered = renderer.render(&project, &res);
+    let rendered = renderer.render_with_options(
+        &project,
+        &res,
+        RenderOptions {
+            verbosity: 1,
+            ..RenderOptions::default()
+        },
+    );
     assert!(
         rendered.stdout.contains("c_chain.c"),
         "소스 파일 경로가 출력에 포함되어야 함"
