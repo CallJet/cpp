@@ -69,6 +69,7 @@ calljet trace "Controller::dispatch" --root . --compile-commands build/compile_c
 
 ### 2. `callers` — Reverse Caller Traversal
 Finds all callers that lead to a specific target function/symbol on demand.
+Default text output consumes the reconstructed paths from each top-level caller to the requested callee directly.
 
 ```bash
 calljet callers <TARGET_SYMBOL> [OPTIONS]

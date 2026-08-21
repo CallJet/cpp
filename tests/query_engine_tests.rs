@@ -741,6 +741,21 @@ fn test_treesitter_fallback_survives_unavailable_semantic_provider() {
     assert_eq!(verified_only.completion, Completion::NoResult);
     assert!(verified_only.edges.is_empty());
     assert!(verified_only.paths.is_empty());
+
+    let mut callers_engine = QueryEngine::new(&project, UnavailableSemanticProvider);
+    let callers = callers_engine
+        .execute(QueryRequest::Callers {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+    let caller_path_names = callers.paths[0]
+        .nodes
+        .iter()
+        .map(|id| callers.symbols.get(id).unwrap().display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(caller_path_names, vec!["root_fn", "mid", "leaf"]);
 }
 
 #[test]

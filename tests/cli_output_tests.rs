@@ -93,6 +93,56 @@ fn test_cli_output_renderer_callers_and_explain() {
 }
 
 #[test]
+fn test_callers_compact_output_uses_reconstructed_caller_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_file = root.join("caller_order.cpp");
+    fs::write(
+        &src_file,
+        r#"
+        void z_leaf() {}
+        void a_middle() { z_leaf(); }
+        void m_root() { a_middle(); }
+        "#,
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "caller_order.cpp",
+            "command": "clang++ -std=c++17 -c caller_order.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let mut engine = QueryEngine::new(&project, ClangProvider::new());
+    let result = engine
+        .execute(QueryRequest::Callers {
+            target: SymbolQuery::parse("z_leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+
+    assert_eq!(result.paths.len(), 1);
+    let rendered = HumanRenderer::new().render(&project, &result);
+    assert_eq!(rendered.stdout, "m_root\na_middle\nz_leaf\n");
+}
+
+#[test]
 fn test_cli_exit_code_on_truncated_and_no_result() {
     let dir = tempdir().unwrap();
     let root = dir.path();
