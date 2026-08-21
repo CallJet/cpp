@@ -258,3 +258,37 @@ fn test_progress_keeps_compact_output_and_hides_project_paths() {
     assert!(!stderr.contains(&root.path().display().to_string()));
     assert!(!stderr.contains(r"\\?\"));
 }
+
+#[test]
+fn test_verbose_levels_imply_matching_progress_detail() {
+    let root = tempdir().unwrap();
+    std::fs::write(
+        root.path().join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
+
+    let verbose = Command::new(env!("CARGO_BIN_EXE_calljet"))
+        .args(["trace", "leaf", "-v", "--root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(verbose.status.code(), Some(0));
+    let verbose_stdout = String::from_utf8(verbose.stdout).unwrap();
+    let verbose_stderr = String::from_utf8(verbose.stderr).unwrap();
+    assert!(verbose_stdout.contains("Directory :"));
+    assert!(verbose_stderr.contains("[CallJet] discovery:"));
+
+    let very_verbose = Command::new(env!("CARGO_BIN_EXE_calljet"))
+        .args(["trace", "leaf", "-vv", "--root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(very_verbose.status.code(), Some(0));
+    let very_verbose_stdout = String::from_utf8(very_verbose.stdout).unwrap();
+    let very_verbose_stderr = String::from_utf8(very_verbose.stderr).unwrap();
+    assert!(very_verbose_stdout.contains("[상세 번역 단위(TU) 리포트]"));
+    assert!(very_verbose_stderr.contains("[CallJet] source root:"));
+    assert!(very_verbose_stderr.contains(&root.path().display().to_string()));
+    assert!(very_verbose_stderr.contains("chain.cpp"));
+}
