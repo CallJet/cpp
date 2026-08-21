@@ -125,9 +125,7 @@ impl DiscoveryIndex {
         }
         for (index, file) in files.iter().enumerate() {
             let processed = index + 1;
-            if self.verbosity > 0
-                && (processed == total_files || processed % progress_step == 0)
-            {
+            if self.verbosity > 0 && (processed == total_files || processed % progress_step == 0) {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
                 eprintln!(
                     "[CallJet] discovery: text prefilter {processed}/{total_files} ({percent}%)"
@@ -186,9 +184,7 @@ impl DiscoveryIndex {
         for (index, file) in new_files.iter().enumerate() {
             let processed = index + 1;
             if verbosity > 0
-                && (processed == 1
-                    || processed == total_files
-                    || processed % progress_step == 0)
+                && (processed == 1 || processed == total_files || processed % progress_step == 0)
             {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
                 if verbosity > 1 {
@@ -782,8 +778,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
                 id: new_id,
                 caller: caller_id,
                 callee_spelling: callee_spelling.clone(),
-                callee_location: callee_node
-                    .map(|node| self.node_source_range(node).start),
+                callee_location: callee_node.map(|node| self.node_source_range(node).start),
                 qualifier_hint: qualifier_hint.clone(),
                 expression: expr_range,
                 expression_text: Some(expr_text),
@@ -1002,19 +997,22 @@ fn file_contains_spelling(path: &Path, spelling: &str) -> bool {
     }
 
     let identifier = needle.iter().all(|byte| is_identifier_byte(*byte));
-    content.windows(needle.len()).enumerate().any(|(offset, window)| {
-        if window != needle {
-            return false;
-        }
-        if !identifier {
-            return true;
-        }
+    content
+        .windows(needle.len())
+        .enumerate()
+        .any(|(offset, window)| {
+            if window != needle {
+                return false;
+            }
+            if !identifier {
+                return true;
+            }
 
-        let left_ok = offset == 0 || !is_identifier_byte(content[offset - 1]);
-        let end = offset + needle.len();
-        let right_ok = end == content.len() || !is_identifier_byte(content[end]);
-        left_ok && right_ok
-    })
+            let left_ok = offset == 0 || !is_identifier_byte(content[offset - 1]);
+            let end = offset + needle.len();
+            let right_ok = end == content.len() || !is_identifier_byte(content[end]);
+            left_ok && right_ok
+        })
 }
 
 fn is_identifier_byte(byte: u8) -> bool {

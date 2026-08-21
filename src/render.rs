@@ -232,14 +232,7 @@ impl HumanRenderer {
             let mut relation_index = 0usize;
             for edge in self.ordered_visible_edges(result, options) {
                 relation_index += 1;
-                self.render_edge(
-                    &mut stdout,
-                    project,
-                    edge,
-                    result,
-                    options,
-                    relation_index,
-                );
+                self.render_edge(&mut stdout, project, edge, result, options, relation_index);
             }
         }
 
@@ -365,10 +358,7 @@ impl HumanRenderer {
             if !self.edge_is_visible(edge, options) {
                 continue;
             }
-            adjacency
-                .entry(edge.caller.clone())
-                .or_default()
-                .push(edge);
+            adjacency.entry(edge.caller.clone()).or_default().push(edge);
             callers.insert(edge.caller.clone());
             if let Some(callee) = &edge.callee {
                 callees.insert(callee.clone());
@@ -385,10 +375,7 @@ impl HumanRenderer {
             });
         }
 
-        let mut starts = callers
-            .difference(&callees)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut starts = callers.difference(&callees).cloned().collect::<Vec<_>>();
         starts.sort_by(|left, right| {
             self.first_callsite_cmp(&adjacency, left, right)
                 .then_with(|| left.cmp(right))
@@ -489,13 +476,7 @@ impl HumanRenderer {
         for (i, node_id) in path.nodes.iter().enumerate() {
             out.push_str(&format!("  Node #{i}\n"));
             let symbol = result.symbols.get(node_id);
-            self.render_symbol_details(
-                out,
-                project,
-                symbol,
-                &format!("{:?}", node_id),
-                "    ",
-            );
+            self.render_symbol_details(out, project, symbol, &format!("{:?}", node_id), "    ");
 
             if i < path.edges.len() {
                 let edge_id = path.edges[i];
@@ -605,10 +586,7 @@ impl HumanRenderer {
             if let Some(expr) = &evidence.expression_text {
                 out.push_str(&format!("{detail_indent}표현식: `{expr}`\n"));
             }
-            out.push_str(&format!(
-                "{detail_indent}사유: {:?}\n",
-                evidence.reason
-            ));
+            out.push_str(&format!("{detail_indent}사유: {:?}\n", evidence.reason));
             if let Some(location) = &evidence.spelling_location {
                 out.push_str(&format!(
                     "{detail_indent}Spelling: {}\n",
@@ -637,10 +615,7 @@ impl HumanRenderer {
                 ));
             }
             for diagnostic in &evidence.clang_diagnostics {
-                out.push_str(&format!(
-                    "{detail_indent}Clang: {}\n",
-                    diagnostic.message
-                ));
+                out.push_str(&format!("{detail_indent}Clang: {}\n", diagnostic.message));
             }
         }
     }
@@ -654,11 +629,8 @@ impl HumanRenderer {
         fallback_name: &str,
         indent: &str,
     ) {
-        let location = symbol.and_then(|item| {
-            item.definition
-                .as_ref()
-                .or(item.declaration.as_ref())
-        });
+        let location =
+            symbol.and_then(|item| item.definition.as_ref().or(item.declaration.as_ref()));
         let directory = location
             .map(|location| {
                 let display_file = project.display_path(&location.file);
