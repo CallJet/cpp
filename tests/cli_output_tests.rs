@@ -145,6 +145,71 @@ fn test_cli_exit_code_on_truncated_and_no_result() {
 }
 
 #[test]
+fn test_compact_output_follows_caller_to_callee_order() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_file = root.join("order.cpp");
+    fs::write(
+        &src_file,
+        r#"
+        void z_leaf() {}
+        void a_side() {}
+        void a_middle() { z_leaf(); }
+        void m_root() { a_middle(); a_side(); }
+        "#,
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "order.cpp",
+            "command": "clang++ -std=c++17 -c order.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let mut engine = QueryEngine::new(&project, ClangProvider::new());
+    let result = engine
+        .execute(QueryRequest::Callees {
+            source: SymbolQuery::parse("m_root"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+    let renderer = HumanRenderer::new();
+    let rendered = renderer.render(&project, &result);
+
+    assert_eq!(rendered.stdout, "m_root\na_middle\nz_leaf\na_side\n");
+
+    let detailed = renderer.render_with_options(
+        &project,
+        &result,
+        RenderOptions {
+            verbosity: 1,
+            ..RenderOptions::default()
+        },
+    );
+    let root_to_middle = detailed.stdout.find("m_root -> a_middle").unwrap();
+    let middle_to_leaf = detailed.stdout.find("a_middle -> z_leaf").unwrap();
+    let root_to_side = detailed.stdout.find("m_root -> a_side").unwrap();
+    assert!(root_to_middle < middle_to_leaf);
+    assert!(middle_to_leaf < root_to_side);
+}
+
+#[test]
 fn test_text_output_separates_directory_namespace_class_and_function() {
     let dir = tempdir().unwrap();
     let root = dir.path();

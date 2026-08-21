@@ -176,3 +176,60 @@ fn test_member_call_resolves_referenced_method() {
     assert_eq!(callee.namespace.as_deref(), Some("App"));
     assert_eq!(callee.class_name.as_deref(), Some("Service"));
 }
+
+#[test]
+fn test_qualified_name_ignores_non_language_semantic_parents() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_file = root.join("linkage.cpp");
+    fs::write(
+        &src_file,
+        r#"
+        extern "C" {
+            namespace Api {
+                void target() {}
+            }
+        }
+
+        void invoke() {
+            Api::target();
+        }
+        "#,
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "linkage.cpp",
+            "command": "clang++ -std=c++17 -c linkage.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let discovery = DiscoveryIndex::build(&project);
+    let candidates = discovery.matching_symbols(&SymbolQuery::parse("Api::target"));
+    let mut provider = ClangProvider::new();
+    let result = provider.resolve_symbols(&project, &discovery, candidates);
+    let symbol = result
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "target")
+        .expect("linkage scope 내부의 target 심볼이 필요함");
+
+    assert_eq!(symbol.display_name(), "Api::target");
+    assert!(!symbol.display_name().contains("linkage.cpp"));
+    assert!(!symbol.display_name().contains('\\'));
+}

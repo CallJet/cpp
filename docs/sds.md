@@ -826,6 +826,9 @@ this remains an internal deterministic choice.
 For stable behavior, candidates and verified edges are sorted before enqueue
 by qualified name, signature, source path, line, column, backend identity, and
 compilation key. Work completion order never determines output order.
+Human-readable results preserve caller-to-callee graph order. Calls made by the
+same caller follow their source call-site positions; symbol identity is only a
+deterministic tie-breaker where the graph has no unique entry order.
 
 **SRS trace:** FR-020–FR-023, FR-026–FR-028, FR-031–FR-036,
 NFR-011–NFR-012, SRS RES-007.
@@ -847,8 +850,9 @@ For `callers(target)`:
 7. Edges whose callee equals the frontier symbol, or whose possible target set
    contains it, are recorded. Their callers enter the next frontier unless
    already expanded at an equal or shallower depth.
-8. Unresolved matching call sites are reported under the current target but
-   are expanded only when their caller has a canonical identity.
+8. A targetless unresolved call site may be retained as one-hop `callers`
+   evidence, but it never enters the reverse frontier. `trace` excludes it
+   because no connected caller-to-callee path can be established.
 
 **SRS trace:** FR-012–FR-024, FR-038–FR-054.
 

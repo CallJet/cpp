@@ -166,6 +166,70 @@ impl SemanticProvider for ResolutionUnavailableButVerificationAvailable {
     }
 }
 
+#[derive(Default)]
+struct TargetlessUnresolvedProvider {
+    verify_calls: usize,
+    next_edge_id: u32,
+}
+
+impl SemanticProvider for TargetlessUnresolvedProvider {
+    fn resolve_symbols(
+        &mut self,
+        _project: &ProjectContext,
+        _discovery: &DiscoveryIndex,
+        _candidates: &[calljet::model::CandidateSymbolId],
+    ) -> ResolutionBatch {
+        ResolutionBatch {
+            failed_contexts: 1,
+            ..ResolutionBatch::default()
+        }
+    }
+
+    fn verify_calls(
+        &mut self,
+        _project: &ProjectContext,
+        discovery: &DiscoveryIndex,
+        batch: VerificationBatch,
+    ) -> VerificationResult {
+        self.verify_calls += 1;
+        let mut result = VerificationResult {
+            context_checked: true,
+            ..VerificationResult::default()
+        };
+
+        for call_id in batch.calls {
+            let Some(call) = discovery.calls.get(&call_id) else {
+                continue;
+            };
+            let Some(caller_candidate) = discovery.symbols.get(&call.caller) else {
+                continue;
+            };
+            let caller = candidate_as_clang_symbol(caller_candidate);
+            if !result
+                .symbols
+                .iter()
+                .any(|existing| existing.id == caller.id)
+            {
+                result.symbols.push(caller.clone());
+            }
+
+            self.next_edge_id = self.next_edge_id.saturating_add(1);
+            result.edges.push(CallEdge {
+                id: CallEdgeId(self.next_edge_id),
+                caller: caller.id,
+                callee: None,
+                callsite: call.expression.clone(),
+                kind: CallKind::Unresolved,
+                confidence: Confidence::Unresolved,
+                contexts: BTreeSet::from([batch.context.clone()]),
+                evidence_by_context: BTreeMap::new(),
+            });
+        }
+
+        result
+    }
+}
+
 fn translation_unit_failure() -> AnalysisIssue {
     AnalysisIssue {
         severity: Severity::Recoverable,
@@ -677,6 +741,58 @@ fn test_treesitter_fallback_survives_unavailable_semantic_provider() {
     assert_eq!(verified_only.completion, Completion::NoResult);
     assert!(verified_only.edges.is_empty());
     assert!(verified_only.paths.is_empty());
+}
+
+#[test]
+fn test_targetless_unresolved_edges_do_not_expand_reverse_traversal() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("chain.cpp"),
+        "void leaf() {}\nvoid mid() { leaf(); }\nvoid root_fn() { mid(); }\n",
+    )
+    .unwrap();
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "chain.cpp",
+            "command": "clang++ -c chain.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let mut callers_engine = QueryEngine::new(&project, TargetlessUnresolvedProvider::default());
+    let callers = callers_engine
+        .execute(QueryRequest::Callers {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+    assert_eq!(callers_engine.provider.verify_calls, 1);
+    assert_eq!(callers.edges.len(), 1);
+    assert!(callers.edges[0].callee.is_none());
+
+    let mut trace_engine = QueryEngine::new(&project, TargetlessUnresolvedProvider::default());
+    let trace = trace_engine
+        .execute(QueryRequest::Trace {
+            target: SymbolQuery::parse("leaf"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+    assert_eq!(trace_engine.provider.verify_calls, 1);
+    assert_eq!(trace.completion, Completion::NoResult);
+    assert!(trace.edges.is_empty());
+    assert!(trace.paths.is_empty());
 }
 
 #[test]
