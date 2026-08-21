@@ -615,7 +615,7 @@ impl ClangProvider {
         symbols
     }
 
-    /// 한 메서드와 재귀적인 override 조상 커서를 안정적인 심볼로 변환한다.
+    /// 한 메서드와 전이적인 override 조상 커서를 안정적인 심볼로 변환한다.
     unsafe fn override_chain_symbols(&self, cursor: CXCursor, language: Language) -> Vec<Symbol> {
         let mut cursors = Vec::new();
         collect_override_chain(cursor, &mut cursors);
@@ -903,33 +903,35 @@ fn is_class_scope_cursor_kind(kind: CXCursorKind) -> bool {
     .contains(&kind)
 }
 
-/// 커서 자신과 재귀적인 override 조상을 canonical cursor로 수집한다.
+/// 커서 자신과 override 조상을 명시적 작업 스택으로 수집한다.
 unsafe fn collect_override_chain(cursor: CXCursor, cursors: &mut Vec<CXCursor>) {
-    let canonical = canonical_cursor_or_self(cursor);
-    if contains_cursor(cursors, canonical) {
-        return;
-    }
-    cursors.push(canonical);
+    let mut pending = vec![cursor];
+    while let Some(current) = pending.pop() {
+        let canonical = canonical_cursor_or_self(current);
+        if contains_cursor(cursors, canonical) {
+            continue;
+        }
+        cursors.push(canonical);
 
-    if canonical.kind != CXCursor_CXXMethod {
-        return;
-    }
+        if canonical.kind != CXCursor_CXXMethod {
+            continue;
+        }
 
-    let mut overridden: *mut CXCursor = std::ptr::null_mut();
-    let mut count: std::os::raw::c_uint = 0;
-    clang_getOverriddenCursors(canonical, &mut overridden, &mut count);
+        let mut overridden: *mut CXCursor = std::ptr::null_mut();
+        let mut count: std::os::raw::c_uint = 0;
+        clang_getOverriddenCursors(canonical, &mut overridden, &mut count);
 
-    let direct_ancestors = if overridden.is_null() || count == 0 {
-        Vec::new()
-    } else {
-        std::slice::from_raw_parts(overridden, count as usize).to_vec()
-    };
-    if !overridden.is_null() {
-        clang_disposeOverriddenCursors(overridden);
-    }
+        let direct_ancestors = if overridden.is_null() || count == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(overridden, count as usize).to_vec()
+        };
+        if !overridden.is_null() {
+            clang_disposeOverriddenCursors(overridden);
+        }
 
-    for ancestor in direct_ancestors {
-        collect_override_chain(ancestor, cursors);
+        // 기존 재귀 DFS와 같은 순서를 유지하도록 역순으로 적재한다.
+        pending.extend(direct_ancestors.into_iter().rev());
     }
 }
 

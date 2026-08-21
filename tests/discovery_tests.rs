@@ -304,6 +304,56 @@ fn test_discovery_malformed_source_handling() {
 }
 
 #[test]
+fn test_discovery_handles_deeply_nested_calls_without_recursive_walk() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_file = root.join("deep_calls.cpp");
+    let nesting_depth = 1024usize;
+    let mut expression = "leaf()".to_string();
+    for _ in 0..nesting_depth {
+        expression = format!("nest({expression})");
+    }
+    fs::write(&src_file, format!("void root() {{ {expression}; }}\n")).unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "deep_calls.cpp",
+            "command": "clang++ -c deep_calls.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    let index = DiscoveryIndex::build(&project);
+    let root_symbol = index.matching_symbols(&SymbolQuery::parse("root"))[0];
+    let calls = index.candidate_callees(root_symbol);
+
+    assert_eq!(calls.len(), nesting_depth + 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|id| index.calls.get(id).unwrap().callee_spelling == "leaf")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|id| index.calls.get(id).unwrap().callee_spelling == "nest")
+            .count(),
+        nesting_depth
+    );
+}
+
+#[test]
 fn test_query_discovery_parses_only_text_prefilter_matches() {
     let dir = tempdir().unwrap();
     let root = dir.path();

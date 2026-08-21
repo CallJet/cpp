@@ -426,91 +426,121 @@ struct AstExtractor<'s, 'b, 'p> {
     current_symbol: Option<CandidateSymbolId>,
 }
 
+/// 재귀 호출 없이 Tree-sitter AST의 진입/이탈 상태를 보존하는 작업 항목.
+enum AstWalkEvent<'tree> {
+    Enter(Node<'tree>),
+    LeaveNamespace(bool),
+    LeaveClass(bool),
+    RestoreSymbol(Option<CandidateSymbolId>),
+}
+
+fn push_child_events<'tree>(events: &mut Vec<AstWalkEvent<'tree>>, node: Node<'tree>) {
+    for index in (0..node.child_count()).rev() {
+        if let Some(child) = node.child(index) {
+            events.push(AstWalkEvent::Enter(child));
+        }
+    }
+}
+
 impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
-    fn walk_node(&mut self, node: Node) {
-        let kind = node.kind();
+    fn walk_node(&mut self, root: Node) {
+        let mut events = vec![AstWalkEvent::Enter(root)];
 
-        // 1. #include 전처리기 디렉티브 감지
-        if kind == "preproc_include" {
-            self.extract_include(node);
-            return;
-        }
+        while let Some(event) = events.pop() {
+            let node = match event {
+                AstWalkEvent::LeaveNamespace(pushed) => {
+                    if pushed {
+                        self.scope_stack.pop();
+                    }
+                    continue;
+                }
+                AstWalkEvent::LeaveClass(pushed) => {
+                    if pushed {
+                        self.class_stack.pop();
+                        self.scope_stack.pop();
+                    }
+                    continue;
+                }
+                AstWalkEvent::RestoreSymbol(previous) => {
+                    self.current_symbol = previous;
+                    continue;
+                }
+                AstWalkEvent::Enter(node) => node,
+            };
+            let kind = node.kind();
 
-        // 2. 네임스페이스 스코프 진입
-        if kind == "namespace_definition" {
-            let ns_name = node
-                .child_by_field_name("name")
-                .map(|n| self.node_text(n))
-                .unwrap_or_default();
-
-            if !ns_name.is_empty() {
-                self.scope_stack.push(ns_name.clone());
+            // 1. #include 전처리기 디렉티브 감지
+            if kind == "preproc_include" {
+                self.extract_include(node);
+                continue;
             }
 
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut cursor = body.walk();
-                for child in body.children(&mut cursor) {
-                    self.walk_node(child);
+            // 2. 네임스페이스 스코프 진입
+            if kind == "namespace_definition" {
+                let ns_name = node
+                    .child_by_field_name("name")
+                    .map(|name| self.node_text(name))
+                    .unwrap_or_default();
+                let pushed = !ns_name.is_empty();
+                if pushed {
+                    self.scope_stack.push(ns_name);
+                }
+
+                events.push(AstWalkEvent::LeaveNamespace(pushed));
+                if let Some(body) = node.child_by_field_name("body") {
+                    push_child_events(&mut events, body);
+                }
+                continue;
+            }
+
+            // 3. 클래스 또는 구조체 스코프 진입
+            if kind == "class_specifier" || kind == "struct_specifier" {
+                let class_name = node
+                    .child_by_field_name("name")
+                    .map(|name| self.node_text(name))
+                    .unwrap_or_default();
+                let pushed = !class_name.is_empty();
+                if pushed {
+                    self.scope_stack.push(class_name.clone());
+                    self.class_stack.push(class_name);
+                }
+
+                events.push(AstWalkEvent::LeaveClass(pushed));
+                if let Some(body) = node.child_by_field_name("body") {
+                    push_child_events(&mut events, body);
+                }
+                continue;
+            }
+
+            // 4. 함수 또는 메서드 정의/선언
+            if kind == "function_definition" {
+                if let Some((symbol, body)) = self.extract_function_definition(node) {
+                    let previous = self.current_symbol.replace(symbol);
+                    events.push(AstWalkEvent::RestoreSymbol(previous));
+                    if let Some(body) = body {
+                        push_child_events(&mut events, body);
+                    }
+                }
+                continue;
+            } else if kind == "declaration"
+                || kind == "field_declaration"
+                || kind == "template_declaration"
+            {
+                if let Some(func_node) = find_function_declarator(node) {
+                    self.extract_function_declaration(node, func_node);
+                    continue;
                 }
             }
 
-            if !ns_name.is_empty() {
-                self.scope_stack.pop();
-            }
-            return;
-        }
-
-        // 3. 클래스 또는 구조체 스코프 진입
-        if kind == "class_specifier" || kind == "struct_specifier" {
-            let class_name = node
-                .child_by_field_name("name")
-                .map(|n| self.node_text(n))
-                .unwrap_or_default();
-
-            if !class_name.is_empty() {
-                self.scope_stack.push(class_name.clone());
-                self.class_stack.push(class_name.clone());
-            }
-
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut cursor = body.walk();
-                for child in body.children(&mut cursor) {
-                    self.walk_node(child);
+            // 5. 호출식 발견 (함수 내부인 경우)
+            if kind == "call_expression" {
+                if let Some(enclosing) = self.current_symbol {
+                    self.extract_call_expression(node, enclosing);
                 }
             }
 
-            if !class_name.is_empty() {
-                self.class_stack.pop();
-                self.scope_stack.pop();
-            }
-            return;
-        }
-
-        // 4. 함수 또는 메서드 정의/선언
-        if kind == "function_definition" {
-            self.extract_function_definition(node);
-            return;
-        } else if kind == "declaration"
-            || kind == "field_declaration"
-            || kind == "template_declaration"
-        {
-            if let Some(func_node) = find_function_declarator(node) {
-                self.extract_function_declaration(node, func_node);
-                return;
-            }
-        }
-
-        // 5. 호출식 발견 (함수 내부인 경우)
-        if kind == "call_expression" {
-            if let Some(enclosing) = self.current_symbol {
-                self.extract_call_expression(node, enclosing);
-            }
-        }
-
-        // 자식 노드 순회
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            self.walk_node(child);
+            // LIFO 작업 스택에 역순으로 넣어 기존 소스 순서 DFS를 유지한다.
+            push_child_events(&mut events, node);
         }
     }
 
@@ -555,21 +585,22 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
     }
 
     /// 함수 정의(Definition) 추출
-    fn extract_function_definition(&mut self, node: Node) {
-        let decl_node = match node.child_by_field_name("declarator") {
-            Some(d) => d,
-            None => return,
-        };
+    fn extract_function_definition<'tree>(
+        &mut self,
+        node: Node<'tree>,
+    ) -> Option<(CandidateSymbolId, Option<Node<'tree>>)> {
+        let decl_node = node.child_by_field_name("declarator")?;
 
         let (name, qual_hint) = self.extract_declarator_name(decl_node);
         if name.is_empty() {
-            return;
+            return None;
         }
 
         let decl_range = self.node_source_range(node);
-        let body_range = node
-            .child_by_field_name("body")
-            .map(|b| self.node_source_range(b));
+        let body = node.child_by_field_name("body");
+        let body_range = body
+            .as_ref()
+            .map(|body_node| self.node_source_range(*body_node));
 
         let current_scope_qualifier = if !self.scope_stack.is_empty() {
             Some(format!("{}::", self.scope_stack.join("::")))
@@ -648,18 +679,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             new_id
         };
 
-        // 함수 본문 내부의 호출식 수집을 위해 current_symbol 설정 후 본문 탐색
-        let prev_symbol = self.current_symbol;
-        self.current_symbol = Some(sym_id);
-
-        if let Some(body) = node.child_by_field_name("body") {
-            let mut cursor = body.walk();
-            for child in body.children(&mut cursor) {
-                self.walk_node(child);
-            }
-        }
-
-        self.current_symbol = prev_symbol;
+        Some((sym_id, body))
     }
 
     /// 함수 선언(Declaration) 추출
@@ -767,56 +787,47 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             callee_spelling: callee_spelling.clone(),
         };
 
-        let _call_id = if let Some(&existing_id) = self.builder.call_keys.get(&call_key) {
-            existing_id
-        } else {
-            let new_id = CandidateCallId(self.builder.next_call_id);
-            self.builder.next_call_id += 1;
-            self.builder.call_keys.insert(call_key, new_id);
+        if self.builder.call_keys.contains_key(&call_key) {
+            return;
+        }
 
-            let candidate_call = CandidateCallSite {
-                id: new_id,
-                caller: caller_id,
-                callee_spelling: callee_spelling.clone(),
-                callee_location: callee_node.map(|node| self.node_source_range(node).start),
-                qualifier_hint: qualifier_hint.clone(),
-                expression: expr_range,
-                expression_text: Some(expr_text),
-                syntax_hint,
-                syntax_complete: !has_syntax_error,
-            };
+        let new_id = CandidateCallId(self.builder.next_call_id);
+        self.builder.next_call_id += 1;
+        self.builder.call_keys.insert(call_key, new_id);
 
-            // 역방향 인덱스 (피호출자 표기 문자열 기준)
-            let spelling_key = NameKey {
-                terminal_name: callee_spelling,
-                qualifier: qualifier_hint,
-            };
-            self.builder
-                .index
-                .calls_by_spelling
-                .entry(spelling_key)
-                .or_default()
-                .push(new_id);
-
-            // 순방향 인덱스 (호출자 심볼 기준)
-            self.builder
-                .index
-                .calls_by_caller
-                .entry(caller_id)
-                .or_default()
-                .push(new_id);
-
-            self.builder.index.calls.insert(new_id, candidate_call);
-            new_id
+        let candidate_call = CandidateCallSite {
+            id: new_id,
+            caller: caller_id,
+            callee_spelling: callee_spelling.clone(),
+            callee_location: callee_node.map(|node| self.node_source_range(node).start),
+            qualifier_hint: qualifier_hint.clone(),
+            expression: expr_range,
+            expression_text: Some(expr_text),
+            syntax_hint,
+            syntax_complete: !has_syntax_error,
         };
 
-        // 호출 인자 내부의 중첩 호출식(예: foo(bar()))을 위해 인자 노드 순회
-        if let Some(args_node) = node.child_by_field_name("arguments") {
-            let mut cursor = args_node.walk();
-            for child in args_node.children(&mut cursor) {
-                self.walk_node(child);
-            }
-        }
+        // 역방향 인덱스 (피호출자 표기 문자열 기준)
+        let spelling_key = NameKey {
+            terminal_name: callee_spelling,
+            qualifier: qualifier_hint,
+        };
+        self.builder
+            .index
+            .calls_by_spelling
+            .entry(spelling_key)
+            .or_default()
+            .push(new_id);
+
+        // 순방향 인덱스 (호출자 심볼 기준)
+        self.builder
+            .index
+            .calls_by_caller
+            .entry(caller_id)
+            .or_default()
+            .push(new_id);
+
+        self.builder.index.calls.insert(new_id, candidate_call);
     }
 
     /// callee 표현식 파싱
@@ -829,54 +840,59 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
         CandidateCallKind,
         Option<Node<'tree>>,
     ) {
-        let kind = func_node.kind();
-
-        match kind {
-            "identifier" => (
-                self.node_text(func_node),
-                None,
-                CandidateCallKind::Direct,
-                Some(func_node),
-            ),
-            "scoped_identifier" | "qualified_identifier" => {
-                let full = self.node_text(func_node);
-                let name_node = func_node.child_by_field_name("name").unwrap_or(func_node);
-                if let Some(pos) = full.rfind("::") {
-                    let qualifier = &full[..pos + 2];
-                    let name = &full[pos + 2..];
-                    (
-                        name.to_string(),
-                        Some(qualifier.to_string()),
-                        CandidateCallKind::Qualified,
-                        Some(name_node),
-                    )
-                } else {
-                    (full, None, CandidateCallKind::Qualified, Some(name_node))
+        let mut current = func_node;
+        loop {
+            match current.kind() {
+                "identifier" => {
+                    return (
+                        self.node_text(current),
+                        None,
+                        CandidateCallKind::Direct,
+                        Some(current),
+                    );
                 }
-            }
-            "field_expression" => {
-                let field_node = func_node.child_by_field_name("field");
-                let field_name = field_node.map(|n| self.node_text(n)).unwrap_or_default();
-                (field_name, None, CandidateCallKind::Member, field_node)
-            }
-            "template_function" => {
-                if let Some(name_node) = func_node.child_by_field_name("name") {
-                    self.parse_callee_expression(name_node)
-                } else {
-                    (
-                        self.node_text(func_node),
+                "scoped_identifier" | "qualified_identifier" => {
+                    let full = self.node_text(current);
+                    let name_node = current.child_by_field_name("name").unwrap_or(current);
+                    if let Some(pos) = full.rfind("::") {
+                        let qualifier = &full[..pos + 2];
+                        let name = &full[pos + 2..];
+                        return (
+                            name.to_string(),
+                            Some(qualifier.to_string()),
+                            CandidateCallKind::Qualified,
+                            Some(name_node),
+                        );
+                    } else {
+                        return (full, None, CandidateCallKind::Qualified, Some(name_node));
+                    }
+                }
+                "field_expression" => {
+                    let field_node = current.child_by_field_name("field");
+                    let field_name = field_node.map(|n| self.node_text(n)).unwrap_or_default();
+                    return (field_name, None, CandidateCallKind::Member, field_node);
+                }
+                "template_function" => {
+                    if let Some(name_node) = current.child_by_field_name("name") {
+                        current = name_node;
+                    } else {
+                        return (
+                            self.node_text(current),
+                            None,
+                            CandidateCallKind::Other,
+                            Some(current),
+                        );
+                    }
+                }
+                _ => {
+                    return (
+                        self.node_text(current),
                         None,
                         CandidateCallKind::Other,
-                        Some(func_node),
-                    )
+                        Some(current),
+                    );
                 }
             }
-            _ => (
-                self.node_text(func_node),
-                None,
-                CandidateCallKind::Other,
-                Some(func_node),
-            ),
         }
     }
 
@@ -957,16 +973,18 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
     }
 }
 
-/// Node 트리 내에서 function_declarator 노드를 재귀적으로 검색
-fn find_function_declarator(node: Node) -> Option<Node> {
-    if node.kind() == "function_declarator" {
-        return Some(node);
-    }
+/// Node 트리 내에서 function_declarator를 명시적 작업 스택으로 검색한다.
+fn find_function_declarator<'tree>(root: Node<'tree>) -> Option<Node<'tree>> {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "function_declarator" {
+            return Some(node);
+        }
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_function_declarator(child) {
-            return Some(found);
+        for index in (0..node.child_count()).rev() {
+            if let Some(child) = node.child(index) {
+                pending.push(child);
+            }
         }
     }
 
