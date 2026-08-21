@@ -1,7 +1,7 @@
 //! 사용자 출력 렌더링 모듈
 //! User output rendering module
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
@@ -30,7 +30,7 @@ pub struct RenderOptions {
     pub format: OutputFormat,
     /// 파일 저장 경로
     pub output_file: Option<PathBuf>,
-    /// 출력 상세도 (0: 경로만, 1: 심볼 구조, 2+: 근거/TU/성능)
+    /// 출력 상세도 (0: 정규화된 함수명만, 1: 심볼 구조, 2+: 근거/TU/성능)
     pub verbosity: u8,
     /// 성능 메트릭 출력 여부
     pub show_metrics: bool,
@@ -301,49 +301,37 @@ impl HumanRenderer {
         stdout
     }
 
-    /// 기본 텍스트 출력: 호출 경로/관계를 한 줄씩만 표시한다.
+    /// 기본 텍스트 출력: namespace/class를 포함한 함수명만 표시한다.
     fn render_compact_text(&self, result: &QueryResult, options: &RenderOptions) -> String {
         let mut out = String::new();
 
         if !result.paths.is_empty() {
-            for path in &result.paths {
-                let chain = path
-                    .nodes
-                    .iter()
-                    .map(|node_id| {
-                        result
-                            .symbols
-                            .get(node_id)
-                            .map(|symbol| symbol.display_name().to_string())
-                            .unwrap_or_else(|| format!("{:?}", node_id))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" -> ");
-                out.push_str(&chain);
-                out.push('\n');
+            for (path_index, path) in result.paths.iter().enumerate() {
+                if path_index > 0 && !out.is_empty() {
+                    out.push('\n');
+                }
+                for node_id in &path.nodes {
+                    if let Some(symbol) = result.symbols.get(node_id) {
+                        out.push_str(symbol.display_name());
+                        out.push('\n');
+                    }
+                }
             }
         } else {
+            let mut emitted = BTreeSet::new();
             for edge in &result.edges {
                 if !self.edge_is_visible(edge, options) {
                     continue;
                 }
 
-                let caller_name = result
-                    .symbols
-                    .get(&edge.caller)
-                    .map(|symbol| symbol.display_name().to_string())
-                    .unwrap_or_else(|| format!("{:?}", edge.caller));
-                let callee_name = edge
-                    .callee
-                    .as_ref()
-                    .and_then(|callee_id| result.symbols.get(callee_id))
-                    .map(|symbol| symbol.display_name().to_string())
-                    .unwrap_or_else(|| "<unresolved>".to_string());
-
-                out.push_str(&format!(
-                    "{caller_name} -> {callee_name} [{}]\n",
-                    edge.confidence
-                ));
+                for symbol_id in std::iter::once(&edge.caller).chain(edge.callee.as_ref()) {
+                    if emitted.insert(symbol_id.clone()) {
+                        if let Some(symbol) = result.symbols.get(symbol_id) {
+                            out.push_str(symbol.display_name());
+                            out.push('\n');
+                        }
+                    }
+                }
             }
         }
 

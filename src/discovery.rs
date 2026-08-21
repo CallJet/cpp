@@ -54,6 +54,8 @@ pub struct DiscoveryIndex {
     candidate_files: Option<Vec<PathBuf>>,
     /// 이미 텍스트 prefilter를 끝낸 단말 이름
     searched_names: BTreeSet<String>,
+    /// 진행 로그 출력 여부
+    progress: bool,
 }
 
 impl DiscoveryIndex {
@@ -63,14 +65,7 @@ impl DiscoveryIndex {
     /// 일반 쿼리 경로는 `discover_query`로 필요한 파일만 지연 파싱한다.
     pub fn build(project: &ProjectContext) -> Self {
         let started = Instant::now();
-        eprintln!("[CallJet] discovery: scanning source tree...");
-        let scan_started = Instant::now();
         let source_files = project.source_files();
-        eprintln!(
-            "[CallJet] discovery: found {} C/C++ file(s) in {:?}",
-            source_files.len(),
-            scan_started.elapsed()
-        );
 
         let mut index = Self {
             candidate_files: Some(source_files.clone()),
@@ -79,13 +74,12 @@ impl DiscoveryIndex {
         };
         index.index_files(project, &source_files);
         index.discovery_time = started.elapsed();
-        eprintln!(
-            "[CallJet] discovery: complete — {} symbol candidate(s), {} call candidate(s) in {:?}",
-            index.symbols.len(),
-            index.calls.len(),
-            index.discovery_time
-        );
         index
+    }
+
+    /// 이름 검색 및 Tree-sitter 진행 로그 출력 여부를 설정한다.
+    pub fn set_progress(&mut self, enabled: bool) {
+        self.progress = enabled;
     }
 
     /// 심볼 쿼리에 필요한 파일만 텍스트로 좁힌 뒤 Tree-sitter로 지연 파싱한다.
@@ -102,14 +96,18 @@ impl DiscoveryIndex {
 
         let started = Instant::now();
         if self.candidate_files.is_none() {
-            eprintln!("[CallJet] discovery: collecting C/C++ file paths...");
+            if self.progress {
+                eprintln!("[CallJet] discovery: collecting C/C++ file paths...");
+            }
             let scan_started = Instant::now();
             let files = project.source_files();
-            eprintln!(
-                "[CallJet] discovery: {} candidate file path(s) in {:?}",
-                files.len(),
-                scan_started.elapsed()
-            );
+            if self.progress {
+                eprintln!(
+                    "[CallJet] discovery: {} candidate file path(s) in {:?}",
+                    files.len(),
+                    scan_started.elapsed()
+                );
+            }
             self.candidate_files = Some(files);
         }
 
@@ -118,13 +116,15 @@ impl DiscoveryIndex {
         let progress_step = (total_files / 10).max(1);
         let mut matches = Vec::new();
 
-        eprintln!(
-            "[CallJet] discovery: text prefilter '{}' across {} file(s)...",
-            spelling, total_files
-        );
+        if self.progress {
+            eprintln!(
+                "[CallJet] discovery: text prefilter '{}' across {} file(s)...",
+                spelling, total_files
+            );
+        }
         for (index, file) in files.iter().enumerate() {
             let processed = index + 1;
-            if processed == total_files || processed % progress_step == 0 {
+            if self.progress && (processed == total_files || processed % progress_step == 0) {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
                 eprintln!(
                     "[CallJet] discovery: text prefilter {processed}/{total_files} ({percent}%)"
@@ -166,12 +166,14 @@ impl DiscoveryIndex {
             .filter(|file| !parsed.contains(file))
             .collect::<Vec<_>>();
 
-        eprintln!(
-            "[CallJet] discovery: '{}' matched {} file(s); Tree-sitter parsing {} new file(s)",
-            spelling,
-            matched_count,
-            new_matches.len()
-        );
+        if self.progress {
+            eprintln!(
+                "[CallJet] discovery: '{}' matched {} file(s); Tree-sitter parsing {} new file(s)",
+                spelling,
+                matched_count,
+                new_matches.len()
+            );
+        }
         self.index_files(project, &new_matches);
         self.discovery_time += started.elapsed();
     }
@@ -196,12 +198,17 @@ impl DiscoveryIndex {
 
         let total_files = new_files.len();
         let progress_step = (total_files / 10).max(1);
+        let progress = self.progress;
         let previous = std::mem::take(self);
         let mut indexer = IndexBuilder::with_index(project, previous);
 
         for (index, file) in new_files.iter().enumerate() {
             let processed = index + 1;
-            if processed == 1 || processed == total_files || processed % progress_step == 0 {
+            if progress
+                && (processed == 1
+                    || processed == total_files
+                    || processed % progress_step == 0)
+            {
                 let percent = processed.saturating_mul(100) / total_files.max(1);
                 eprintln!(
                     "[CallJet] discovery: Tree-sitter {processed}/{total_files} ({percent}%) — {}",

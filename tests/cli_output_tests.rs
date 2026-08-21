@@ -64,10 +64,12 @@ fn test_cli_output_renderer_callers_and_explain() {
         rendered.exit_code, 0,
         "성공적인 callers 쿼리는 exit code 0이어야 함"
     );
-    assert!(rendered.stdout.contains("[CONFIRMED]"));
-    assert!(rendered.stdout.contains("caller -> target"));
+    assert_eq!(rendered.stdout, "caller\ntarget\n");
+    assert!(!rendered.stdout.contains("->"));
+    assert!(!rendered.stdout.contains("[CONFIRMED]"));
     assert!(!rendered.stdout.contains("상태: 분석 완료"));
     assert!(!rendered.stdout.contains("Directory :"));
+    assert!(!rendered.stdout.contains("app.cpp"));
 
     // 2. explain 렌더링 검증
     let explain_res = engine
@@ -202,10 +204,28 @@ fn test_text_output_separates_directory_namespace_class_and_function() {
     let renderer = HumanRenderer::new();
     let compact = renderer.render(&project, &result);
 
-    assert!(compact
-        .stdout
-        .contains("App::Controller::run -> App::Service::target [CONFIRMED]"));
+    assert_eq!(
+        compact.stdout,
+        "App::Controller::run\nApp::Service::target\n"
+    );
+    assert!(!compact.stdout.contains("->"));
     assert!(!compact.stdout.contains("Directory :"));
+    assert!(!compact.stdout.contains("member.cpp"));
+
+    let trace_result = engine
+        .execute(QueryRequest::Trace {
+            target: SymbolQuery::parse("App::Service::target"),
+            max_depth: None,
+            verified_only: false,
+        })
+        .unwrap();
+    let compact_trace = renderer.render(&project, &trace_result);
+    assert_eq!(
+        compact_trace.stdout,
+        "App::Controller::run\nApp::Service::target\n"
+    );
+    assert!(!compact_trace.stdout.contains("->"));
+    assert!(!compact_trace.stdout.contains("member.cpp"));
 
     let rendered = renderer.render_with_options(
         &project,

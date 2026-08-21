@@ -154,13 +154,14 @@ CallJet employs an honest **3-state Confidence Model**:
 * **`[POSSIBLE]`**: Valid candidate with multiple runtime targets (e.g. virtual method dispatch).
 * **`[UNRESOLVED]`**: Semantic call target could not be statically determined (e.g. indirect function pointer).
 
-### Default Output (`calljet callers c_leaf`)
+### Default Output (`calljet trace c_leaf`)
 ```text
-c_mid -> c_leaf [CONFIRMED]
-c_root -> c_mid [CONFIRMED]
+c_root
+c_mid
+c_leaf
 ```
 
-Use `-v` to include `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, and callsites. Use `-vv` to additionally include semantic evidence, contexts, Translation Unit details, and performance metrics. The long-form `--verbose` remains equivalent to `-v`.
+Successful default text output prints only qualified function symbols, such as `namespace::class::function`, one per line. It omits the banner, progress logs, file paths, labels, arrows, confidence, and callsites. Use `-v` to enable progress logs and include `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, and callsites. Use `-vv` to additionally include semantic evidence, contexts, Translation Unit details, and performance metrics. The long-form `--verbose` remains equivalent to `-v`.
 
 ---
 
