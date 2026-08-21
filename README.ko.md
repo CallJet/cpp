@@ -151,13 +151,14 @@ CallJet은 정적 분석의 한계를 솔직하게 표시하는 3단계 신뢰�
 * **`[POSSIBLE]`**: 가상 함수(Virtual dispatch) 등 런타임에 여러 타겟으로 분기될 수 있는 호출
 * **`[UNRESOLVED]`**: 함수 포인터 등 정적으로 대상을 확정할 수 없는 호출
 
-### 기본 출력 (`calljet callers c_leaf`)
+### 기본 출력 (`calljet trace c_leaf`)
 ```text
-c_mid -> c_leaf [CONFIRMED]
-c_root -> c_mid [CONFIRMED]
+c_root
+c_mid
+c_leaf
 ```
 
-`-v`를 지정하면 `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, callsite를 함께 표시합니다. `-vv`는 시맨틱 근거, 컨텍스트, 번역 단위(TU) 상세, 성능 지표까지 추가합니다. 기존 긴 옵션 `--verbose`는 `-v`와 같습니다.
+성공한 기본 text 출력은 `namespace::class::function` 형태의 정규화된 함수 심볼만 한 줄씩 표시합니다. 배너, 진행 로그, 파일 경로, 라벨, 화살표, 신뢰도, callsite는 표시하지 않습니다. `-v`를 지정하면 진행 로그와 함께 `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, callsite를 표시합니다. `-vv`는 시맨틱 근거, 컨텍스트, 번역 단위(TU) 상세, 성능 지표까지 추가합니다. 기존 긴 옵션 `--verbose`는 `-v`와 같습니다.
 
 ---
 

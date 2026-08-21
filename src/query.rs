@@ -14,6 +14,14 @@ use crate::model::{
 use crate::project::ProjectContext;
 use crate::semantic::{SemanticProvider, VerificationBatch};
 
+macro_rules! progress_log {
+    ($enabled:expr, $($arg:tt)*) => {
+        if $enabled {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// 순회 프론티어 아이템 (Traversal Frontier Item, SDS §9.1)
 #[derive(Debug, Clone)]
 pub struct FrontierItem {
@@ -36,6 +44,7 @@ pub struct QueryEngine<'a, S: SemanticProvider> {
     pub project: &'a ProjectContext,
     pub discovery: DiscoveryIndex,
     pub provider: S,
+    progress: bool,
 }
 
 impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
@@ -45,7 +54,14 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             project,
             discovery: DiscoveryIndex::default(),
             provider,
+            progress: false,
         }
+    }
+
+    /// 쿼리, 순회 및 discovery 진행 로그 출력 여부를 설정한다.
+    pub fn set_progress(&mut self, enabled: bool) {
+        self.progress = enabled;
+        self.discovery.set_progress(enabled);
     }
 
     /// 쿼리 요청 실행
@@ -209,12 +225,14 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
         let query_name = if include_paths { "trace" } else { "callers" };
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] query/{query_name}: resolving target '{}'...",
             target_query.raw
         );
         let target_sym = self.resolve_endpoint(&target_query)?;
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] traversal/{query_name}: reverse search from {}",
             target_sym.display_name()
         );
@@ -241,7 +259,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             processed_nodes += 1;
             if reported_depth != Some(item.depth) {
                 reported_depth = Some(item.depth);
-                eprintln!(
+                progress_log!(
+                    self.progress,
                     "[CallJet] traversal/{query_name}: depth {}, processed {}, queued {}, verified edges {}",
                     item.depth,
                     processed_nodes,
@@ -289,7 +308,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             for (ctx_key, calls) in batches {
                 verified_batches += 1;
                 if verified_batches == 1 || verified_batches % 25 == 0 {
-                    eprintln!(
+                    progress_log!(
+                        self.progress,
                         "[CallJet] traversal/{query_name}: verifying TU batch {verified_batches} ({} call candidate(s))",
                         calls.len()
                     );
@@ -387,7 +407,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             Completion::Complete
         };
 
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] traversal/{query_name}: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s), {} path(s)",
             edges_vec.len(),
             paths.len()
@@ -412,12 +433,14 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         verified_only: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] query/callees: resolving source '{}'...",
             source_query.raw
         );
         let source_sym = self.resolve_endpoint(&source_query)?;
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] traversal/callees: forward search from {}",
             source_sym.display_name()
         );
@@ -444,7 +467,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             processed_nodes += 1;
             if reported_depth != Some(item.depth) {
                 reported_depth = Some(item.depth);
-                eprintln!(
+                progress_log!(
+                    self.progress,
                     "[CallJet] traversal/callees: depth {}, processed {}, queued {}, verified edges {}",
                     item.depth,
                     processed_nodes,
@@ -497,7 +521,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             for (ctx_key, calls) in batches {
                 verified_batches += 1;
                 if verified_batches == 1 || verified_batches % 25 == 0 {
-                    eprintln!(
+                    progress_log!(
+                        self.progress,
                         "[CallJet] traversal/callees: verifying TU batch {verified_batches} ({} call candidate(s))",
                         calls.len()
                     );
@@ -576,7 +601,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             Completion::Complete
         };
 
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] traversal/callees: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
             edges_vec.len()
         );
@@ -601,14 +627,16 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         verified_only: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] query/path: resolving '{}' -> '{}'...",
             source_query.raw, target_query.raw
         );
         let source_sym = self.resolve_endpoint(&source_query)?;
         let target_sym = self.resolve_endpoint(&target_query)?;
         let target_candidates = self.discovery.matching_symbols(&target_query).to_vec();
-        eprintln!(
+        progress_log!(
+            self.progress,
             "[CallJet] traversal/path: forward search {} -> {}",
             source_sym.display_name(),
             target_sym.display_name()
@@ -625,7 +653,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 edges: vec![],
             };
             let counts = calculate_counts(&symbols_map, &[], std::slice::from_ref(&path));
-            eprintln!("[CallJet] traversal/path: source and target are identical");
+            progress_log!(
+                self.progress,
+                "[CallJet] traversal/path: source and target are identical"
+            );
             return Ok(QueryResult {
                 completion: Completion::Complete,
                 symbols: symbols_map,
@@ -657,7 +688,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             processed_nodes += 1;
             if reported_depth != Some(item.depth) {
                 reported_depth = Some(item.depth);
-                eprintln!(
+                progress_log!(
+                    self.progress,
                     "[CallJet] traversal/path: depth {}, processed {}, queued {}, verified edges {}",
                     item.depth,
                     processed_nodes,
@@ -709,7 +741,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             for (ctx_key, calls) in batches {
                 verified_batches += 1;
                 if verified_batches == 1 || verified_batches % 25 == 0 {
-                    eprintln!(
+                    progress_log!(
+                        self.progress,
                         "[CallJet] traversal/path: verifying TU batch {verified_batches} ({} call candidate(s))",
                         calls.len()
                     );
@@ -803,7 +836,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 edges: path_edges,
             };
             let counts = calculate_counts(&symbols_map, &edges_vec, std::slice::from_ref(&path));
-            eprintln!(
+            progress_log!(
+                self.progress,
                 "[CallJet] traversal/path: found — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} hop(s)",
                 path.edges.len()
             );
@@ -819,7 +853,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             })
         } else if truncated {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
-            eprintln!(
+            progress_log!(
+                self.progress,
                 "[CallJet] traversal/path: truncated — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
                 edges_vec.len()
             );
@@ -836,7 +871,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             })
         } else {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
-            eprintln!(
+            progress_log!(
+                self.progress,
                 "[CallJet] traversal/path: no path — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
                 edges_vec.len()
             );

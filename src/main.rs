@@ -13,28 +13,35 @@ use calljet::render::HumanRenderer;
 use calljet::semantic::clang::ClangProvider;
 
 fn main() {
-    eprint!("{CALLJET_ASCII_ART}");
-
     let cli = Cli::parse();
 
     let (input, request, render_options) = match cli.into_execution_plan() {
         Ok(req) => req,
         Err(err) => {
+            eprint!("{CALLJET_ASCII_ART}");
             eprintln!("[CallJet] input error: {err}");
             process::exit(1);
         }
     };
+    let progress = render_options.verbosity > 0;
 
-    eprintln!("[CallJet] source root: {}", input.source_root.display());
-    eprintln!(
-        "[CallJet] compilation database: {}",
-        input.compile_commands_path.display()
-    );
-    eprintln!("[CallJet] loading project...");
+    if progress {
+        eprint!("{CALLJET_ASCII_ART}");
+        eprintln!("[CallJet] source root: {}", input.source_root.display());
+        eprintln!(
+            "[CallJet] compilation database: {}",
+            input.compile_commands_path.display()
+        );
+        eprintln!("[CallJet] loading project...");
+    }
 
     let project = match ProjectContext::load(input) {
         Ok(p) => p,
         Err(err) => {
+            if !progress {
+                eprint!("{CALLJET_ASCII_ART}");
+                eprintln!("[CallJet] loading project...");
+            }
             eprintln!("[CallJet] project initialization failed: {err}");
             if let InputError::InvalidCompilationDatabase { path, .. } = &err {
                 if !path.exists() {
@@ -46,16 +53,21 @@ fn main() {
         }
     };
 
-    eprintln!(
-        "[CallJet] project loaded: {} compilation unit(s)",
-        project.compilation_db.all_source_files().len()
-    );
-    eprintln!("[CallJet] discovering candidates...");
+    if progress {
+        eprintln!(
+            "[CallJet] project loaded: {} compilation unit(s)",
+            project.compilation_db.all_source_files().len()
+        );
+        eprintln!("[CallJet] discovering candidates...");
+    }
 
     let provider = ClangProvider::new();
     let mut engine = QueryEngine::new(&project, provider);
+    engine.set_progress(progress);
 
-    eprintln!("[CallJet] executing query...");
+    if progress {
+        eprintln!("[CallJet] executing query...");
+    }
     let result = match engine.execute(request) {
         Ok(res) => res,
         Err(err) => {
@@ -81,6 +93,8 @@ fn main() {
         eprint!("{}", rendered.stderr);
     }
 
-    eprintln!("[CallJet] finished with exit code {}", rendered.exit_code);
+    if progress {
+        eprintln!("[CallJet] finished with exit code {}", rendered.exit_code);
+    }
     process::exit(rendered.exit_code);
 }
