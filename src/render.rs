@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::cli::OutputFormat;
 use crate::model::{
-    BackendSymbolId, CallEdge, CallKind, CallPath, Completion, Confidence, QueryResult, SymbolId,
+    BackendSymbolId, CallEdge, CallKind, CallPath, Completion, Confidence, QueryResult, Symbol,
+    SymbolId,
 };
 use crate::project::ProjectContext;
 
@@ -29,8 +30,8 @@ pub struct RenderOptions {
     pub format: OutputFormat,
     /// 파일 저장 경로
     pub output_file: Option<PathBuf>,
-    /// 상세 번역 단위(TU) 출력 여부
-    pub verbose: bool,
+    /// 출력 상세도 (0: 경로만, 1: 심볼 구조, 2+: 근거/TU/성능)
+    pub verbosity: u8,
     /// 성능 메트릭 출력 여부
     pub show_metrics: bool,
     /// 미해결(UNRESOLVED) 엣지 숨기기
@@ -44,7 +45,7 @@ impl Default for RenderOptions {
         Self {
             format: OutputFormat::Text,
             output_file: None,
-            verbose: false,
+            verbosity: 0,
             show_metrics: false,
             no_unresolved: false,
             no_foreign: false,
@@ -195,26 +196,48 @@ impl HumanRenderer {
         result: &QueryResult,
         options: &RenderOptions,
     ) -> String {
+        if options.verbosity == 0 {
+            return self.render_compact_text(result, options);
+        }
+
         let mut stdout = String::new();
 
         // 1. 경로 결과가 있는 경우 경로 렌더링 (path 커맨드)
         if !result.paths.is_empty() {
             stdout.push_str("=== 호출 경로 (Call Path) ===\n");
             for (idx, path) in result.paths.iter().enumerate() {
-                stdout.push_str(&format!("경로 #{}:\n", idx + 1));
-                self.render_path(&mut stdout, project, path, result);
+                let chain = path
+                    .nodes
+                    .iter()
+                    .map(|node_id| {
+                        result
+                            .symbols
+                            .get(node_id)
+                            .map(|symbol| symbol.display_name().to_string())
+                            .unwrap_or_else(|| format!("{:?}", node_id))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                stdout.push_str(&format!("경로 #{}: {chain}\n", idx + 1));
+                self.render_path(&mut stdout, project, path, result, options);
             }
         } else if !result.edges.is_empty() {
             // 2. 엣지 목록 렌더링 (callers, callees, explain)
             stdout.push_str("=== 호출 관계 (Call Edges) ===\n");
+            let mut relation_index = 0usize;
             for edge in &result.edges {
-                if options.no_unresolved && edge.confidence == Confidence::Unresolved {
+                if !self.edge_is_visible(edge, options) {
                     continue;
                 }
-                if options.no_foreign && edge.kind == CallKind::Foreign {
-                    continue;
-                }
-                self.render_edge(&mut stdout, project, edge, result);
+                relation_index += 1;
+                self.render_edge(
+                    &mut stdout,
+                    project,
+                    edge,
+                    result,
+                    options,
+                    relation_index,
+                );
             }
         }
 
@@ -245,8 +268,8 @@ impl HumanRenderer {
             result.counts.unresolved_edges
         ));
 
-        // verbose 모드일 때 상세 번역 단위(TU) 파일 목록 출력
-        if options.verbose {
+        // -vv 이상에서 상세 번역 단위(TU) 파일 목록 출력
+        if options.verbosity >= 2 {
             let verified_count = result.metrics.verified_source_files.len();
             let skipped_count = result.metrics.skipped_source_files.len();
             let total_count = verified_count + skipped_count;
@@ -270,28 +293,94 @@ impl HumanRenderer {
             }
         }
 
-        // --metrics 플래그 지정 시 성능 지표 출력
-        if options.show_metrics {
-            stdout.push_str("\n[성능 및 비용 지표 (Performance Metrics)]\n");
-            stdout.push_str(&format!(
-                "• 총 소요 시간: {:?}\n",
-                result.metrics.total_query_time
-            ));
-            stdout.push_str(&format!(
-                "• Tree-sitter 탐색 시간: {:?}\n",
-                result.metrics.discovery_time
-            ));
-            stdout.push_str(&format!(
-                "• Clang 시맨틱 검증 시간: {:?}\n",
-                result.metrics.verification_time
-            ));
-            stdout.push_str(&format!(
-                "• Clang TU 파싱 횟수: {}회 (캐시 히트: {}회)\n",
-                result.metrics.clang_tu_parses, result.metrics.tu_cache_hits
-            ));
+        // --metrics 또는 -vv 지정 시 성능 지표 출력
+        if options.show_metrics || options.verbosity >= 2 {
+            self.render_metrics(&mut stdout, result);
         }
 
         stdout
+    }
+
+    /// 기본 텍스트 출력: 호출 경로/관계를 한 줄씩만 표시한다.
+    fn render_compact_text(&self, result: &QueryResult, options: &RenderOptions) -> String {
+        let mut out = String::new();
+
+        if !result.paths.is_empty() {
+            for path in &result.paths {
+                let chain = path
+                    .nodes
+                    .iter()
+                    .map(|node_id| {
+                        result
+                            .symbols
+                            .get(node_id)
+                            .map(|symbol| symbol.display_name().to_string())
+                            .unwrap_or_else(|| format!("{:?}", node_id))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                out.push_str(&chain);
+                out.push('\n');
+            }
+        } else {
+            for edge in &result.edges {
+                if !self.edge_is_visible(edge, options) {
+                    continue;
+                }
+
+                let caller_name = result
+                    .symbols
+                    .get(&edge.caller)
+                    .map(|symbol| symbol.display_name().to_string())
+                    .unwrap_or_else(|| format!("{:?}", edge.caller));
+                let callee_name = edge
+                    .callee
+                    .as_ref()
+                    .and_then(|callee_id| result.symbols.get(callee_id))
+                    .map(|symbol| symbol.display_name().to_string())
+                    .unwrap_or_else(|| "<unresolved>".to_string());
+
+                out.push_str(&format!(
+                    "{caller_name} -> {callee_name} [{}]\n",
+                    edge.confidence
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            out.push_str("결과 없음 (No Result)\n");
+        }
+
+        if options.show_metrics {
+            self.render_metrics(&mut out, result);
+        }
+
+        out
+    }
+
+    fn edge_is_visible(&self, edge: &CallEdge, options: &RenderOptions) -> bool {
+        !(options.no_unresolved && edge.confidence == Confidence::Unresolved
+            || options.no_foreign && edge.kind == CallKind::Foreign)
+    }
+
+    fn render_metrics(&self, out: &mut String, result: &QueryResult) {
+        out.push_str("\n[성능 및 비용 지표 (Performance Metrics)]\n");
+        out.push_str(&format!(
+            "• 총 소요 시간: {:?}\n",
+            result.metrics.total_query_time
+        ));
+        out.push_str(&format!(
+            "• Tree-sitter 탐색 시간: {:?}\n",
+            result.metrics.discovery_time
+        ));
+        out.push_str(&format!(
+            "• Clang 시맨틱 검증 시간: {:?}\n",
+            result.metrics.verification_time
+        ));
+        out.push_str(&format!(
+            "• Clang TU 파싱 횟수: {}회 (캐시 히트: {}회)\n",
+            result.metrics.clang_tu_parses, result.metrics.tu_cache_hits
+        ));
     }
 
     /// 단일 경로 렌더링
@@ -301,25 +390,18 @@ impl HumanRenderer {
         project: &ProjectContext,
         path: &CallPath,
         result: &QueryResult,
+        options: &RenderOptions,
     ) {
         for (i, node_id) in path.nodes.iter().enumerate() {
-            let sym_name = if let Some(sym) = result.symbols.get(node_id) {
-                sym.display_name().to_string()
-            } else {
-                format!("{:?}", node_id)
-            };
-
-            let loc_str = if let Some(sym) = result.symbols.get(node_id) {
-                if let Some(decl) = &sym.declaration {
-                    format!(" ({})", self.format_location(project, decl))
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-
-            out.push_str(&format!("  [{i}] {sym_name}{loc_str}\n"));
+            out.push_str(&format!("  Node #{i}\n"));
+            let symbol = result.symbols.get(node_id);
+            self.render_symbol_details(
+                out,
+                project,
+                symbol,
+                &format!("{:?}", node_id),
+                "    ",
+            );
 
             if i < path.edges.len() {
                 let edge_id = path.edges[i];
@@ -327,9 +409,14 @@ impl HumanRenderer {
                     let conf_str = format!("[{}]", edge.confidence);
                     let kind_str = format!("({})", edge.kind);
                     let loc_str = self.format_range(project, &edge.callsite);
-                    out.push_str(&format!("      ↓ {conf_str} {kind_str} at {loc_str}\n"));
+                    out.push_str(&format!(
+                        "    ↓ {conf_str} {kind_str} Callsite: {loc_str}\n"
+                    ));
+                    if options.verbosity >= 2 {
+                        self.render_edge_evidence(out, project, edge, "    ");
+                    }
                 } else {
-                    out.push_str("      ↓ [call]\n");
+                    out.push_str("    ↓ [call]\n");
                 }
             }
         }
@@ -342,6 +429,8 @@ impl HumanRenderer {
         project: &ProjectContext,
         edge: &CallEdge,
         result: &QueryResult,
+        options: &RenderOptions,
+        relation_index: usize,
     ) {
         let caller_name = result
             .symbols
@@ -364,26 +453,147 @@ impl HumanRenderer {
             Confidence::Unresolved => "[UNRESOLVED]",
         };
 
-        let loc_str = self.format_range(project, &edge.callsite);
-
         out.push_str(&format!(
-            "• {conf_tag} {caller_name} -> {callee_name} ({}, at {loc_str})\n",
+            "Relation #{relation_index}: {caller_name} -> {callee_name} {conf_tag} ({})\n",
             edge.kind
         ));
+        out.push_str("  Caller\n");
+        self.render_symbol_details(
+            out,
+            project,
+            result.symbols.get(&edge.caller),
+            &caller_name,
+            "    ",
+        );
+        out.push_str("  Callee\n");
+        self.render_symbol_details(
+            out,
+            project,
+            edge.callee
+                .as_ref()
+                .and_then(|callee_id| result.symbols.get(callee_id)),
+            &callee_name,
+            "    ",
+        );
+        out.push_str(&format!(
+            "  Callsite : {}\n",
+            self.format_range(project, &edge.callsite)
+        ));
 
-        // 검증 증거(Evidence) 세부 정보 (explain 및 상세 보기 지원)
-        for (ctx_key, evidence) in &edge.evidence_by_context {
-            if let Some(expr) = &evidence.expression_text {
-                out.push_str(&format!("    표현식: `{expr}`\n"));
-            }
-            out.push_str(&format!(
-                "    사유: {:?}, 컨텍스트: {}\n",
-                evidence.reason, ctx_key.0
-            ));
-            if evidence.is_virtual {
-                out.push_str("    가상 함수 디스패치(Virtual Dispatch)\n");
+        if options.verbosity >= 2 {
+            self.render_edge_evidence(out, project, edge, "  ");
+        }
+        out.push('\n');
+    }
+
+    fn render_edge_evidence(
+        &self,
+        out: &mut String,
+        project: &ProjectContext,
+        edge: &CallEdge,
+        indent: &str,
+    ) {
+        let item_indent = format!("{indent}  ");
+        let detail_indent = format!("{item_indent}  ");
+
+        if !edge.contexts.is_empty() {
+            out.push_str(&format!("{indent}Contexts\n"));
+            for context in &edge.contexts {
+                out.push_str(&format!("{item_indent}- {}\n", context.0));
             }
         }
+
+        if !edge.evidence_by_context.is_empty() {
+            out.push_str(&format!("{indent}Evidence\n"));
+        }
+        for (context, evidence) in &edge.evidence_by_context {
+            out.push_str(&format!("{item_indent}Context: {}\n", context.0));
+            if let Some(expr) = &evidence.expression_text {
+                out.push_str(&format!("{detail_indent}표현식: `{expr}`\n"));
+            }
+            out.push_str(&format!(
+                "{detail_indent}사유: {:?}\n",
+                evidence.reason
+            ));
+            if let Some(location) = &evidence.spelling_location {
+                out.push_str(&format!(
+                    "{detail_indent}Spelling: {}\n",
+                    self.format_location(project, location)
+                ));
+            }
+            if let Some(location) = &evidence.expansion_location {
+                out.push_str(&format!(
+                    "{detail_indent}Expansion: {}\n",
+                    self.format_location(project, location)
+                ));
+            }
+            if evidence.is_virtual {
+                out.push_str(&format!(
+                    "{detail_indent}가상 함수 디스패치(Virtual Dispatch)\n"
+                ));
+            }
+            if evidence.is_template_related {
+                out.push_str(&format!(
+                    "{detail_indent}템플릿 관련 호출(Template Related)\n"
+                ));
+            }
+            if evidence.is_macro_expanded {
+                out.push_str(&format!(
+                    "{detail_indent}매크로 확장 호출(Macro Expanded)\n"
+                ));
+            }
+            for diagnostic in &evidence.clang_diagnostics {
+                out.push_str(&format!(
+                    "{detail_indent}Clang: {}\n",
+                    diagnostic.message
+                ));
+            }
+        }
+    }
+
+    /// 심볼을 디렉터리와 C++ 소유 범위로 분해해 일관된 계층형 블록으로 출력한다.
+    fn render_symbol_details(
+        &self,
+        out: &mut String,
+        project: &ProjectContext,
+        symbol: Option<&Symbol>,
+        fallback_name: &str,
+        indent: &str,
+    ) {
+        let location = symbol.and_then(|item| {
+            item.definition
+                .as_ref()
+                .or(item.declaration.as_ref())
+        });
+        let directory = location
+            .map(|location| {
+                let display_file = project.display_path(&location.file);
+                display_file
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(|parent| parent.display().to_string())
+                    .unwrap_or_else(|| ".".to_string())
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let full_symbol = symbol
+            .map(|item| item.display_name())
+            .unwrap_or(fallback_name);
+        let namespace = symbol
+            .and_then(|item| item.namespace.as_deref())
+            .unwrap_or("<global>");
+        let class_name = symbol
+            .and_then(|item| item.class_name.as_deref())
+            .unwrap_or("<none>");
+        let function = symbol
+            .map(|item| item.name.as_str())
+            .unwrap_or(fallback_name);
+
+        out.push_str(&format!("{indent}Directory : {directory}\n"));
+        out.push_str(&format!("{indent}FullSymbol: {full_symbol}\n"));
+        out.push_str(&format!("{indent}Namespace : {namespace}\n"));
+        out.push_str(&format!("{indent}Class     : {class_name}\n"));
+        out.push_str(&format!("{indent}Function  : {function}\n"));
     }
 
     /// 소스 위치 포맷팅 (프로젝트 루트 기준 상대 경로 변환)

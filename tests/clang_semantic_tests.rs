@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use calljet::cli::ProjectInput;
 use calljet::discovery::DiscoveryIndex;
-use calljet::model::SymbolQuery;
+use calljet::model::{CandidateCallKind, Confidence, SymbolQuery};
 use calljet::project::ProjectContext;
 use calljet::semantic::clang::{ensure_libclang_loaded, ClangProvider};
 use calljet::semantic::{SemanticProvider, VerificationBatch};
@@ -89,4 +89,90 @@ fn test_clang_provider_tu_caching_invariant() {
         "동일한 Translation Unit에 대해 반복 파싱이 발생하지 않아야 함 (FR-045 불변식)"
     );
     assert!(provider.tu_cache_hits >= 1, "TU 캐시 히트가 발생해야 함");
+}
+
+#[test]
+fn test_member_call_resolves_referenced_method() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src_file = root.join("member.cpp");
+    fs::write(
+        &src_file,
+        r#"
+        namespace App {
+            class Service {
+            public:
+                void target() {}
+            };
+
+            class Controller {
+            public:
+                void run(Service& service) {
+                    service.target();
+                }
+            };
+        }
+        "#,
+    )
+    .unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "member.cpp",
+            "command": "clang++ -std=c++17 -c member.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+    if !ensure_libclang_loaded() {
+        return;
+    }
+
+    let discovery = DiscoveryIndex::build(&project);
+    let run_candidates = discovery.matching_symbols(&SymbolQuery::parse("App::Controller::run"));
+    let run_candidate = *run_candidates.first().expect("run 후보가 필요함");
+    let calls = discovery.candidate_callees(run_candidate).to_vec();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        discovery.calls.get(&calls[0]).unwrap().syntax_hint,
+        CandidateCallKind::Member
+    );
+
+    let context = project.compilation_db.contexts_for_source(&src_file)[0]
+        .key
+        .clone();
+    let mut provider = ClangProvider::new();
+    let result = provider.verify_calls(
+        &project,
+        &discovery,
+        VerificationBatch {
+            context,
+            symbols: Vec::new(),
+            calls,
+        },
+    );
+
+    assert_eq!(result.edges.len(), 1);
+    assert_eq!(result.edges[0].confidence, Confidence::Confirmed);
+    let callee_id = result.edges[0]
+        .callee
+        .as_ref()
+        .expect("멤버 호출 대상이 해석되어야 함");
+    let callee = result
+        .symbols
+        .iter()
+        .find(|symbol| &symbol.id == callee_id)
+        .expect("피호출자 심볼 메타데이터가 필요함");
+    assert_eq!(callee.display_name(), "App::Service::target");
+    assert_eq!(callee.namespace.as_deref(), Some("App"));
+    assert_eq!(callee.class_name.as_deref(), Some("Service"));
 }

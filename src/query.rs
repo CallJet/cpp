@@ -7,9 +7,9 @@ use std::time::Instant;
 use crate::diagnostic::{FatalError, QueryError};
 use crate::discovery::DiscoveryIndex;
 use crate::model::{
-    CallEdge, CallEdgeId, CallPath, CandidateCallId, CompilationKey, Completion, Confidence,
-    QueryMetrics, QueryRequest, QueryResult, ResultCounts, Symbol, SymbolId, SymbolQuery,
-    VerifiedEdgeKey,
+    CallEdge, CallEdgeId, CallPath, CandidateCallId, CandidateSymbol, CandidateSymbolKind,
+    CompilationKey, Completion, Confidence, QueryMetrics, QueryRequest, QueryResult, ResultCounts,
+    Symbol, SymbolId, SymbolQuery, VerifiedEdgeKey,
 };
 use crate::project::ProjectContext;
 use crate::semantic::{SemanticProvider, VerificationBatch};
@@ -151,6 +151,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         if resolution.symbols.is_empty() {
             // Clang에서 해석하지 못한 경우, 힌트 기반으로 임시 fallback 심볼 생성
             let first_cand = self.discovery.symbols.get(&cand_ids[0]).unwrap();
+            let (namespace, class_name) = candidate_scope_parts(first_cand);
             let sym = Symbol {
                 id: SymbolId::clang_usr(first_cand.language, format!("usr:@{}", first_cand.name)),
                 name: first_cand.name.clone(),
@@ -158,6 +159,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     .qualifier_hint
                     .clone()
                     .map(|q| format!("{q}{}", first_cand.name)),
+                namespace,
+                class_name,
                 signature: None,
                 declaration: Some(first_cand.declaration.start.clone()),
                 definition: None,
@@ -885,6 +888,31 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             diagnostics: Vec::new(),
             metrics: metrics.clone(),
         })
+    }
+}
+
+/// Tree-sitter 후보 한정자에서 출력용 네임스페이스/클래스 힌트를 분리한다.
+fn candidate_scope_parts(candidate: &CandidateSymbol) -> (Option<String>, Option<String>) {
+    let mut segments = candidate
+        .qualifier_hint
+        .as_deref()
+        .unwrap_or_default()
+        .trim_end_matches("::")
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    match candidate.syntactic_kind {
+        CandidateSymbolKind::Function => {
+            let namespace = (!segments.is_empty()).then(|| segments.join("::"));
+            (namespace, None)
+        }
+        CandidateSymbolKind::Method | CandidateSymbolKind::ConstructorOrDestructor => {
+            let class_name = segments.pop().or_else(|| candidate.owner_hint.clone());
+            let namespace = (!segments.is_empty()).then(|| segments.join("::"));
+            (namespace, class_name)
+        }
     }
 }
 

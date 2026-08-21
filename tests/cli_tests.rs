@@ -142,7 +142,7 @@ fn test_cli_rich_options_parsing() {
         "--output",
         "output.json",
         "--metrics",
-        "--verbose",
+        "-vv",
         "--no-unresolved",
         "--no-foreign",
     ])
@@ -155,9 +155,25 @@ fn test_cli_rich_options_parsing() {
         Some(std::path::PathBuf::from("output.json"))
     );
     assert!(render_opts.show_metrics);
-    assert!(render_opts.verbose);
+    assert_eq!(render_opts.verbosity, 2);
     assert!(render_opts.no_unresolved);
     assert!(render_opts.no_foreign);
+}
+
+#[test]
+fn test_cli_verbosity_count_and_long_option_compatibility() {
+    let short = Cli::try_parse_from(["calljet", "callers", "target_fn", "-v"]).unwrap();
+    let (_, _, short_options) = short.into_execution_plan().unwrap();
+    assert_eq!(short_options.verbosity, 1);
+
+    let repeated = Cli::try_parse_from(["calljet", "callers", "target_fn", "-vv"]).unwrap();
+    let (_, _, repeated_options) = repeated.into_execution_plan().unwrap();
+    assert_eq!(repeated_options.verbosity, 2);
+
+    let long =
+        Cli::try_parse_from(["calljet", "callers", "target_fn", "--verbose"]).unwrap();
+    let (_, _, long_options) = long.into_execution_plan().unwrap();
+    assert_eq!(long_options.verbosity, 1);
 }
 
 #[test]

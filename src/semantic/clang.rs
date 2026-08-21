@@ -401,17 +401,93 @@ impl ClangProvider {
         };
 
         let qualified_name = self.extract_qualified_name(cursor);
+        let (namespace, class_name) = self.extract_scope_parts(cursor);
         let signature = self.extract_signature(cursor);
         let declaration = self.get_cursor_location(cursor);
+        let definition_cursor = clang_getCursorDefinition(cursor);
+        let definition = if clang_Cursor_isNull(definition_cursor) == 0 {
+            self.get_cursor_location(definition_cursor)
+        } else {
+            None
+        };
 
         Some(Symbol {
             id: symbol_id,
             name,
             qualified_name: Some(qualified_name),
+            namespace,
+            class_name,
             signature,
             declaration,
-            definition: None,
+            definition,
         })
+    }
+
+    /// 현재 커서 또는 호출 표현식의 멤버 이름 위치에서 실제 callable 선언을 찾는다.
+    unsafe fn find_callee_reference(
+        &self,
+        tu: CXTranslationUnit,
+        cx_file: CXFile,
+        cursor: CXCursor,
+        call_site: &crate::model::CandidateCallSite,
+    ) -> Option<CXCursor> {
+        if let Some(referenced) = self.callable_reference(cursor, &call_site.callee_spelling) {
+            return Some(referenced);
+        }
+
+        // `obj.method()`의 Tree-sitter 범위는 `obj`에서 시작하므로 위 cursor가
+        // 객체 변수 참조일 수 있다. 실제 `method` 토큰 위치의 MemberRefExpr에
+        // clang_getCursorReferenced를 다시 적용한다.
+        let member_point = call_site
+            .callee_location
+            .as_ref()
+            .and_then(|location| location.point)
+            .or_else(|| callee_spelling_point(call_site))?;
+        let member_location = clang_getLocation(
+            tu,
+            cx_file,
+            member_point.line,
+            member_point.column,
+        );
+        let member_cursor = clang_getCursor(tu, member_location);
+        if clang_Cursor_isNull(member_cursor) != 0 {
+            return None;
+        }
+
+        self.callable_reference(member_cursor, &call_site.callee_spelling)
+    }
+
+    /// 참조 커서가 기대한 함수/메서드 선언을 가리키는 경우 canonical cursor를 반환한다.
+    unsafe fn callable_reference(&self, cursor: CXCursor, expected_name: &str) -> Option<CXCursor> {
+        if is_callable_cursor_kind(cursor.kind) {
+            let spelling = get_cx_string(clang_getCursorSpelling(cursor));
+            if spelling == expected_name {
+                let canonical = clang_getCanonicalCursor(cursor);
+                return Some(if clang_Cursor_isNull(canonical) == 0 {
+                    canonical
+                } else {
+                    cursor
+                });
+            }
+        }
+
+        let referenced = clang_getCursorReferenced(cursor);
+        if clang_Cursor_isNull(referenced) != 0 {
+            return None;
+        }
+
+        let canonical = clang_getCanonicalCursor(referenced);
+        let callable = if clang_Cursor_isNull(canonical) == 0 {
+            canonical
+        } else {
+            referenced
+        };
+        if !is_callable_cursor_kind(callable.kind) {
+            return None;
+        }
+
+        let spelling = get_cx_string(clang_getCursorSpelling(callable));
+        (spelling == expected_name).then_some(callable)
     }
 
     /// 단일 후보 호출에 대한 Clang 시맨틱 검증 수행
@@ -447,16 +523,13 @@ impl ClangProvider {
             let caller_cand = discovery.symbols.get(&call_site.caller)?;
             let caller_sym = self.resolve_symbol_with_cand(tu, caller_cand)?;
 
-            // 피호출자 참조 커서 탐색
-            let ref_cursor = clang_getCursorReferenced(cursor);
-            let canonical_ref = if clang_Cursor_isNull(ref_cursor) == 0 {
-                clang_getCanonicalCursor(ref_cursor)
-            } else {
-                clang_getNullCursor()
-            };
+            // 피호출자 참조 커서 탐색. 멤버 호출은 실제 멤버 토큰 위치에서 재시도한다.
+            let canonical_ref = self
+                .find_callee_reference(tu, cx_file, cursor, call_site)
+                .unwrap_or_else(|| clang_getNullCursor());
 
-            let is_virtual =
-                clang_isVirtualBase(cursor) != 0 || clang_CXXMethod_isVirtual(ref_cursor) != 0;
+            let is_virtual = canonical_ref.kind == CXCursor_CXXMethod
+                && clang_CXXMethod_isVirtual(canonical_ref) != 0;
 
             let (callee_sym, kind, confidence, reason) = if clang_Cursor_isNull(canonical_ref) == 0
             {
@@ -502,7 +575,10 @@ impl ClangProvider {
                 },
                 clang_diagnostics: Vec::new(),
                 reason,
-                spelling_location: Some(call_site.expression.start.clone()),
+                spelling_location: call_site
+                    .callee_location
+                    .clone()
+                    .or_else(|| Some(call_site.expression.start.clone())),
                 expansion_location: Some(call_site.expression.start.clone()),
                 is_virtual,
                 is_template_related: false,
@@ -571,6 +647,35 @@ impl ClangProvider {
         }
     }
 
+    /// Clang semantic parent 종류를 이용해 네임스페이스와 클래스 소유자를 분리한다.
+    unsafe fn extract_scope_parts(&self, cursor: CXCursor) -> (Option<String>, Option<String>) {
+        let mut namespaces = Vec::new();
+        let mut classes = Vec::new();
+        let mut parent = clang_getCursorSemanticParent(cursor);
+
+        while clang_Cursor_isNull(parent) == 0 && parent.kind != CXCursor_TranslationUnit {
+            let spelling = get_cx_string(clang_getCursorSpelling(parent));
+            if !spelling.is_empty() {
+                match parent.kind {
+                    CXCursor_Namespace => namespaces.push(spelling),
+                    CXCursor_ClassDecl
+                    | CXCursor_StructDecl
+                    | CXCursor_UnionDecl
+                    | CXCursor_ClassTemplate
+                    | CXCursor_ClassTemplatePartialSpecialization => classes.push(spelling),
+                    _ => {}
+                }
+            }
+            parent = clang_getCursorSemanticParent(parent);
+        }
+
+        namespaces.reverse();
+        classes.reverse();
+        let namespace = (!namespaces.is_empty()).then(|| namespaces.join("::"));
+        let class_name = (!classes.is_empty()).then(|| classes.join("::"));
+        (namespace, class_name)
+    }
+
     /// 커서로부터 함수 시그니처 문자열 추출
     unsafe fn extract_signature(&self, cursor: CXCursor) -> Option<String> {
         let cur_type = clang_getCursorType(cursor);
@@ -581,6 +686,49 @@ impl ClangProvider {
             None
         }
     }
+}
+
+/// Tree-sitter 호출식 원문에서 피호출자 단말 이름의 1-based 위치를 계산한다.
+fn callee_spelling_point(
+    call_site: &crate::model::CandidateCallSite,
+) -> Option<LineColumn> {
+    let start = call_site.expression.start.point?;
+    let expression = call_site.expression_text.as_deref()?;
+    let callable_part = expression
+        .split_once('(')
+        .map(|(before_args, _)| before_args)
+        .unwrap_or(expression);
+    let byte_offset = callable_part.rfind(&call_site.callee_spelling)?;
+    let prefix = &expression[..byte_offset];
+    let line_delta = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+
+    if line_delta == 0 {
+        Some(LineColumn {
+            line: start.line,
+            column: start.column.saturating_add(byte_offset as u32),
+        })
+    } else {
+        let column = prefix
+            .rsplit_once('\n')
+            .map(|(_, tail)| tail.len() as u32 + 1)
+            .unwrap_or(1);
+        Some(LineColumn {
+            line: start.line.saturating_add(line_delta),
+            column,
+        })
+    }
+}
+
+fn is_callable_cursor_kind(kind: CXCursorKind) -> bool {
+    matches!(
+        kind,
+        CXCursor_FunctionDecl
+            | CXCursor_CXXMethod
+            | CXCursor_Constructor
+            | CXCursor_Destructor
+            | CXCursor_ConversionFunction
+            | CXCursor_FunctionTemplate
+    )
 }
 
 /// CXString 문자열 변환 및 자동 메모리 해제 헬퍼

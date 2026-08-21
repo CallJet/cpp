@@ -431,6 +431,7 @@ impl<'a> IndexBuilder<'a> {
             language: lang,
             builder: self,
             scope_stack: Vec::new(),
+            class_stack: Vec::new(),
             current_symbol: None,
         };
 
@@ -445,6 +446,7 @@ struct AstExtractor<'s, 'b, 'p> {
     language: Language,
     builder: &'b mut IndexBuilder<'p>,
     scope_stack: Vec<String>,
+    class_stack: Vec<String>,
     current_symbol: Option<CandidateSymbolId>,
 }
 
@@ -491,6 +493,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
 
             if !class_name.is_empty() {
                 self.scope_stack.push(class_name.clone());
+                self.class_stack.push(class_name.clone());
             }
 
             if let Some(body) = node.child_by_field_name("body") {
@@ -501,6 +504,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             }
 
             if !class_name.is_empty() {
+                self.class_stack.pop();
                 self.scope_stack.pop();
             }
             return;
@@ -604,7 +608,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             (None, None) => None,
         };
 
-        let syntactic_kind = if !self.scope_stack.is_empty() {
+        let syntactic_kind = if !self.class_stack.is_empty() {
             CandidateSymbolKind::Method
         } else {
             CandidateSymbolKind::Function
@@ -632,7 +636,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
                 name: name.clone(),
                 qualifier_hint: final_qualifier.clone(),
                 signature_hint: None,
-                owner_hint: self.scope_stack.last().cloned(),
+                owner_hint: self.class_stack.last().cloned(),
                 declaration: decl_range,
                 definition_body: body_range,
                 syntax_complete: !has_syntax_error,
@@ -703,7 +707,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             (None, None) => None,
         };
 
-        let syntactic_kind = if !self.scope_stack.is_empty() {
+        let syntactic_kind = if !self.class_stack.is_empty() {
             CandidateSymbolKind::Method
         } else {
             CandidateSymbolKind::Function
@@ -729,7 +733,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
                 name: name.clone(),
                 qualifier_hint: final_qualifier.clone(),
                 signature_hint: None,
-                owner_hint: self.scope_stack.last().cloned(),
+                owner_hint: self.class_stack.last().cloned(),
                 declaration: decl_range,
                 definition_body: None,
                 syntax_complete: !has_syntax_error,
@@ -770,7 +774,7 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
             None => return,
         };
 
-        let (callee_spelling, qualifier_hint, syntax_hint) =
+        let (callee_spelling, qualifier_hint, syntax_hint, callee_node) =
             self.parse_callee_expression(func_node);
         if callee_spelling.is_empty() {
             return;
@@ -798,6 +802,8 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
                 id: new_id,
                 caller: caller_id,
                 callee_spelling: callee_spelling.clone(),
+                callee_location: callee_node
+                    .map(|node| self.node_source_range(node).start),
                 qualifier_hint: qualifier_hint.clone(),
                 expression: expr_range,
                 expression_text: Some(expr_text),
@@ -839,16 +845,27 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
     }
 
     /// callee 표현식 파싱
-    fn parse_callee_expression(
+    fn parse_callee_expression<'tree>(
         &self,
-        func_node: Node,
-    ) -> (String, Option<String>, CandidateCallKind) {
+        func_node: Node<'tree>,
+    ) -> (
+        String,
+        Option<String>,
+        CandidateCallKind,
+        Option<Node<'tree>>,
+    ) {
         let kind = func_node.kind();
 
         match kind {
-            "identifier" => (self.node_text(func_node), None, CandidateCallKind::Direct),
+            "identifier" => (
+                self.node_text(func_node),
+                None,
+                CandidateCallKind::Direct,
+                Some(func_node),
+            ),
             "scoped_identifier" | "qualified_identifier" => {
                 let full = self.node_text(func_node);
+                let name_node = func_node.child_by_field_name("name").unwrap_or(func_node);
                 if let Some(pos) = full.rfind("::") {
                     let qualifier = &full[..pos + 2];
                     let name = &full[pos + 2..];
@@ -856,24 +873,35 @@ impl<'s, 'b, 'p> AstExtractor<'s, 'b, 'p> {
                         name.to_string(),
                         Some(qualifier.to_string()),
                         CandidateCallKind::Qualified,
+                        Some(name_node),
                     )
                 } else {
-                    (full, None, CandidateCallKind::Qualified)
+                    (full, None, CandidateCallKind::Qualified, Some(name_node))
                 }
             }
             "field_expression" => {
                 let field_node = func_node.child_by_field_name("field");
                 let field_name = field_node.map(|n| self.node_text(n)).unwrap_or_default();
-                (field_name, None, CandidateCallKind::Member)
+                (field_name, None, CandidateCallKind::Member, field_node)
             }
             "template_function" => {
                 if let Some(name_node) = func_node.child_by_field_name("name") {
                     self.parse_callee_expression(name_node)
                 } else {
-                    (self.node_text(func_node), None, CandidateCallKind::Other)
+                    (
+                        self.node_text(func_node),
+                        None,
+                        CandidateCallKind::Other,
+                        Some(func_node),
+                    )
                 }
             }
-            _ => (self.node_text(func_node), None, CandidateCallKind::Other),
+            _ => (
+                self.node_text(func_node),
+                None,
+                CandidateCallKind::Other,
+                Some(func_node),
+            ),
         }
     }
 

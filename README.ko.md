@@ -138,7 +138,7 @@ calljet explain process_event dispatch
 | `--no-unresolved` | - | `false` | `[UNRESOLVED]` 미해결 엣지를 결과에서 제외 |
 | `--no-foreign` | - | `false` | 외부 라이브러리 경계 호출을 결과에서 제외 |
 | `--metrics` | - | `false` | 소요 시간 및 메모리 등 성능 메트릭 상세 출력 |
-| `--verbose` | - | `false` | 시맨틱 검증된 파일 및 생략된 번역 단위(TU) 목록 상세 출력 |
+| `--verbose` | `-v` | `0` | 텍스트 상세도 증가 (`-v`: 심볼 계층/callsite, `-vv`: 근거·컨텍스트·TU·성능 지표) |
 | `--help` | `-h` | - | 도움말 출력 |
 
 ---
@@ -151,20 +151,13 @@ CallJet은 정적 분석의 한계를 솔직하게 표시하는 3단계 신뢰�
 * **`[POSSIBLE]`**: 가상 함수(Virtual dispatch) 등 런타임에 여러 타겟으로 분기될 수 있는 호출
 * **`[UNRESOLVED]`**: 함수 포인터 등 정적으로 대상을 확정할 수 없는 호출
 
-### 출력 예시 (`calljet callers c_leaf`)
+### 기본 출력 (`calljet callers c_leaf`)
 ```text
-=== 호출 관계 (Call Edges) ===
-• [CONFIRMED] c_mid -> c_leaf (direct, at src/c_chain.c:3:16-24)
-    표현식: `c_leaf()`
-    사유: ExactReference, 컨텍스트: src/c_chain.c#0
-• [CONFIRMED] c_root -> c_mid (direct, at src/c_chain.c:4:17-24)
-    표현식: `c_mid()`
-    사유: ExactReference, 컨텍스트: src/c_chain.c#0
-
---- 분석 결과 요약 ---
-상태: 분석 완료 (Complete)
-통계: 총 심볼 3개, 확정 엣지(CONFIRMED) 2개, 가능 엣지(POSSIBLE) 0개, 미해결 엣지(UNRESOLVED) 0개
+c_mid -> c_leaf [CONFIRMED]
+c_root -> c_mid [CONFIRMED]
 ```
+
+`-v`를 지정하면 `Directory`, `FullSymbol`, `Namespace`, `Class`, `Function`, callsite를 함께 표시합니다. `-vv`는 시맨틱 근거, 컨텍스트, 번역 단위(TU) 상세, 성능 지표까지 추가합니다. 기존 긴 옵션 `--verbose`는 `-v`와 같습니다.
 
 ---
 

@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::diagnostic::InputError;
@@ -67,9 +67,14 @@ pub struct CommonOptions {
     #[arg(long = "metrics", default_value_t = false, global = true)]
     pub metrics: bool,
 
-    /// 상세 분석 메트릭 및 번역 단위(TU) 파일 목록 출력
-    #[arg(long = "verbose", default_value_t = false, global = true)]
-    pub verbose: bool,
+    /// 출력 상세도 증가 (-v: 심볼 구조, -vv: 근거/TU/성능)
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        action = ArgAction::Count,
+        global = true
+    )]
+    pub verbose: u8,
 }
 
 /// 탐색 제어 옵션 (Traversal Options)
@@ -274,7 +279,7 @@ impl Cli {
         let render_options = crate::render::RenderOptions {
             format: common.format,
             output_file: common.output,
-            verbose: common.verbose,
+            verbosity: common.verbose,
             show_metrics: common.metrics,
             no_unresolved,
             no_foreign,
