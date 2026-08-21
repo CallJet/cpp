@@ -5,9 +5,10 @@
 Minimize semantic work per query without sacrificing the ability to explain
 and qualify every returned call edge.
 
-The central constraint is:
+The central constraints are:
 
-> Clang verification is demand-driven and batched by translation unit.
+> Tree-sitter discovery is the usable baseline. Clang verification is an
+> optional, demand-driven strengthening step batched by translation unit.
 
 ## Query pipeline
 
@@ -22,9 +23,9 @@ Collect candidate call sites
   ↓
 Map candidates to translation units
   ↓
-Parse each relevant TU once with Clang
+If build context is usable, parse each relevant TU once with Clang
   ↓
-Verify all pending candidates in that TU
+Verify pending candidates, otherwise retain syntactic candidates as POSSIBLE
   ↓
 Add qualified edges to the query frontier
   ↓
@@ -70,8 +71,9 @@ Tree-sitter extracts enough syntax to narrow the semantic search:
 - source ranges
 - files likely to contain callers or callees
 
-Discovery records facts it can observe and candidates it infers. It does not
-manufacture canonical symbols or mark an inferred edge as confirmed.
+Discovery records facts it can observe and candidates it infers. It may assign
+a location-based traversal identity to a complete candidate, but it never marks
+an inferred edge as confirmed.
 
 ### Discovery index
 
@@ -82,9 +84,10 @@ justifies it.
 
 ### Semantic verification
 
-The compilation database supplies the command, working directory, include
-paths, defines, and language options required to parse each translation unit
-as the project builds it.
+When present and usable, the compilation database supplies the command, working
+directory, include paths, defines, and language options required to parse each
+translation unit as the project builds it. A missing or invalid database is a
+recoverable loss of semantic precision, not a discovery failure.
 
 Candidates are grouped by translation unit before invoking Clang:
 
@@ -103,6 +106,8 @@ it destroys the expected performance advantage of syntactic discovery.
 
 Headers do not independently define reliable compilation context. A candidate
 in a header must be verified through a translation unit that includes it.
+When no such context can be parsed, complete Tree-sitter candidates remain in
+default traversal as `POSSIBLE`; `--verified-only` excludes them.
 
 ### Path engine
 
@@ -189,7 +194,8 @@ must not interpret backend-specific contents.
 
 Before verification, discovery records a candidate identity containing its
 available name, scope, signature hints, and source location. Candidate and
-verified identities must not be treated as interchangeable.
+verified identities are not interchangeable proof, but traversal bridges them
+by syntactic identity when a later step regains Clang verification.
 
 ## Query behavior
 
@@ -197,22 +203,24 @@ verified identities must not be treated as interchangeable.
 
 1. Resolve the target symbol or report ambiguity.
 2. Find syntactic call sites that may refer to it.
-3. Verify candidates in TU batches.
-4. Add accepted callers to the frontier.
+3. Verify candidates in TU batches when their contexts are usable.
+4. Add accepted callers, or complete syntactic candidates after unavailable
+   verification, to the frontier with their corresponding confidence.
 5. Repeat until the depth limit or frontier is exhausted.
 
 ### Callees
 
 1. Resolve the source function.
 2. Discover calls inside its definition.
-3. Verify those call sites in the owning TU.
-4. Add accepted callees to the frontier.
+3. Verify those call sites in the owning TU when possible.
+4. Add verified callees or complete syntactic candidates to the frontier.
 5. Repeat within the requested bound.
 
 ### Path
 
 1. Resolve source and target symbols.
-2. Traverse a bounded frontier using verified or explicitly qualified edges.
+2. Traverse a bounded frontier using verified or explicitly qualified
+   syntactic candidate edges.
 3. Stop when a path reaches the target.
 4. Return the path with source locations and confidence.
 
@@ -240,6 +248,7 @@ tree. Network transport is outside the architecture.
 ## Performance invariants
 
 - Never run project-wide Clang analysis as a prerequisite for one query.
+- Never make Tree-sitter discovery depend on Clang or a compilation database.
 - Never parse the same translation unit once per candidate within a query.
 - Stop expanding when the query is answered or its bound is reached.
 - Measure discovery breadth, verified TU count, and elapsed time separately.

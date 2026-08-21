@@ -14,13 +14,13 @@ pub const CALLJET_ASCII_ART: &str = r#"
           FIND THE PATH. SKIP THE WHOLE GRAPH.
 "#;
 
-/// Actionable help displayed when the compilation database is absent.
+/// Actionable help text for enabling semantic verification when the database is absent.
 pub fn missing_compilation_database_help(path: &Path) -> String {
     format!(
         "[CallJet] compilation database not found: {}\n\
-[CallJet] analysis stopped before source parsing; no compiler command was run.\n\
+[CallJet] continuing with Tree-sitter candidates; Clang semantic verification is unavailable.\n\
 \n\
-Create a compilation database with CMake:\n\
+To enable CONFIRMED semantic results, create a compilation database with CMake:\n\
   cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON\n\
 \n\
 Then pass the generated file to CallJet:\n\

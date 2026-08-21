@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use calljet::cli::ProjectInput;
 use calljet::compile_db::CompilationDb;
-use calljet::diagnostic::InputError;
+use calljet::diagnostic::{AnalysisCause, Diagnostic, InputError};
 use calljet::project::ProjectContext;
 
 #[test]
@@ -39,6 +39,32 @@ fn test_malformed_json_compile_commands() {
         }
         err => panic!("예상치 못한 에러: {err:?}"),
     }
+}
+
+#[test]
+fn test_project_context_continues_without_compilation_database() {
+    let dir = tempdir().unwrap();
+    let source_file = dir.path().join("standalone.cpp");
+    fs::write(&source_file, "void standalone() {}\n").unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: dir.path().to_path_buf(),
+        compile_commands_path: dir.path().join("compile_commands.json"),
+    })
+    .expect("컴파일 데이터베이스가 없어도 Tree-sitter 프로젝트는 로드되어야 함");
+
+    assert!(project.compilation_db.all_source_files().is_empty());
+    assert!(project.compilation_db.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            Diagnostic::Analysis(issue)
+                if matches!(
+                    &issue.cause,
+                    AnalysisCause::MissingCompilationContext
+                )
+        )
+    }));
+    assert_eq!(project.source_files(), vec![fs::canonicalize(source_file).unwrap()]);
 }
 
 #[test]
@@ -122,6 +148,98 @@ fn test_valid_compile_commands_with_multiple_contexts() {
         1,
         "helper.cpp는 중복 제거되어 1개의 컨텍스트만 가져야 함"
     );
+}
+
+#[test]
+fn test_command_preserves_windows_backslashes_inside_double_quotes() {
+    let dir = tempdir().unwrap();
+    let source_file = dir.path().join("main.c");
+    fs::write(&source_file, "int main(void) { return 0; }").unwrap();
+
+    let db_path = dir.path().join("compile_commands.json");
+    let json_content = serde_json::json!([{
+        "directory": dir.path().to_str().unwrap(),
+        "file": "main.c",
+        "command": r#"clang "-IC:\Program Files\SDK\include" -c main.c"#
+    }]);
+    fs::write(
+        &db_path,
+        serde_json::to_string_pretty(&json_content).unwrap(),
+    )
+    .unwrap();
+
+    let db = CompilationDb::load(&db_path).unwrap();
+    let context = &db.contexts_for_source(&source_file)[0];
+    let args = context
+        .clang_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args, vec![r#"-IC:\Program Files\SDK\include"#]);
+}
+
+#[test]
+fn test_cpp_driver_restores_implicit_language_mode() {
+    let dir = tempdir().unwrap();
+    let source_file = dir.path().join("legacy.c");
+    fs::write(&source_file, "class Legacy {};").unwrap();
+
+    let db_path = dir.path().join("compile_commands.json");
+    let json_content = serde_json::json!([{
+        "directory": dir.path().to_str().unwrap(),
+        "file": "legacy.c",
+        "arguments": [
+            r#"C:\MinGW\bin\g++.exe"#,
+            "-DCPP_MODE",
+            "-c",
+            "legacy.c"
+        ]
+    }]);
+    fs::write(
+        &db_path,
+        serde_json::to_string_pretty(&json_content).unwrap(),
+    )
+    .unwrap();
+
+    let db = CompilationDb::load(&db_path).unwrap();
+    let context = &db.contexts_for_source(&source_file)[0];
+    let args = context
+        .clang_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args, vec!["-x", "c++", "-DCPP_MODE"]);
+}
+
+#[test]
+fn test_cpp_driver_preserves_explicit_language_mode() {
+    let dir = tempdir().unwrap();
+    let source_file = dir.path().join("forced.c");
+    fs::write(&source_file, "int forced(void) { return 0; }").unwrap();
+
+    let db_path = dir.path().join("compile_commands.json");
+    let json_content = serde_json::json!([{
+        "directory": dir.path().to_str().unwrap(),
+        "file": "forced.c",
+        "arguments": ["clang++", "-x", "c", "-c", "forced.c"]
+    }]);
+    fs::write(
+        &db_path,
+        serde_json::to_string_pretty(&json_content).unwrap(),
+    )
+    .unwrap();
+
+    let db = CompilationDb::load(&db_path).unwrap();
+    let context = &db.contexts_for_source(&source_file)[0];
+    let args = context
+        .clang_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args, vec!["-x", "c"]);
 }
 
 #[test]

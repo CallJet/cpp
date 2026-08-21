@@ -18,7 +18,8 @@ Evidence-dependent targets that remain open are recorded in
 
 The governing design principle is:
 
-> Tree-sitter performs cheap candidate discovery. Clang performs precise
+> Tree-sitter performs cheap candidate discovery and supplies the fallback
+> result graph. Clang optionally strengthens relevant candidates with precise
 > semantic verification. Expensive semantic work is restricted to the code
 > required by the current query.
 
@@ -33,7 +34,7 @@ flowchart LR
     User[Developer / Reviewer]
     CLI[calljet CLI]
     Source[(Local C/C++ source root)]
-    CompDB[(Local compile_commands.json)]
+    CompDB[(Optional local compile_commands.json)]
     TS[Tree-sitter]
     Clang[Local Clang library]
     Output[stdout / stderr / exit status]
@@ -185,18 +186,18 @@ sequenceDiagram
     participant Render
 
     User->>CLI: callers / callees / path / explain
-    CLI->>Project: validate source root and compilation database
-    Project-->>CLI: immutable project context or fatal diagnostic
+    CLI->>Project: validate source root; load optional compilation database
+    Project-->>CLI: immutable project context or source-root fatal diagnostic
     CLI->>Query: QueryRequest + ProjectContext
     Query->>Disc: locate candidate source/target symbols
     Query->>Sem: resolve viable symbol candidates by TU context
-    Sem-->>Query: canonical symbols or ambiguity/not-found evidence
+    Sem-->>Query: canonical symbols, unavailable status, or rejection evidence
     loop while frontier remains and bound permits
         Query->>Disc: candidate call sites for frontier symbol
         Disc-->>Query: deduplicated candidate set
         Query->>Sem: verification batches grouped by TU context
-        Sem-->>Query: qualified edges + recoverable issues
-        Query->>Query: filter, record, enqueue, detect cycles
+        Sem-->>Query: qualified edges or unavailable status + recoverable issues
+        Query->>Query: retain syntactic fallback, filter, enqueue, detect cycles
     end
     Query-->>Render: complete or partial QueryResult
     Render-->>CLI: deterministic stdout/stderr payload
@@ -270,8 +271,9 @@ struct VerificationBatch {
 
 Processing rules:
 
-1. Validate file existence, readability, JSON syntax, and non-empty usable
-   entries before query execution.
+1. Validate file existence, readability, JSON syntax, and usable entries before
+   relying on semantic build context. Missing or invalid data records a
+   recoverable diagnostic and leaves semantic contexts empty.
 2. Resolve relative `directory` and `file` values without changing their
    intended build context.
 3. Prefer the database's argument-vector form when available; otherwise use
@@ -299,8 +301,9 @@ Headers do not supply standalone build context. Discovery records syntactic
 include relationships and associates a header candidate with compilation
 contexts whose source files may include it. Clang confirms whether the header
 and candidate occur in each selected TU. If no usable including context can be
-found, the candidate remains unresolved with a missing-build-context issue; it
-is not confirmed using guessed flags.
+found, the complete candidate remains `POSSIBLE` (or `UNRESOLVED` when no
+callee identity is available) with a missing-build-context issue; it is not
+confirmed using guessed flags.
 
 This include association is a candidate narrowing mechanism, not semantic
 proof. It may scan include directives broadly but may not trigger Clang parsing
@@ -656,6 +659,7 @@ enum VerificationReason {
     CursorNotFound,
     AmbiguousReference,
     ForeignBoundary,
+    SyntacticCandidate,
 }
 ```
 
@@ -664,9 +668,11 @@ with known candidate targets are represented as separate edges per target so
 traversal can continue without pretending one is definite. Evidence remains
 attached to each edge and directly drives `explain` output.
 
-Missing build context and TU parse failure are analysis failures, not
-`UNRESOLVED` evidence, and therefore do not construct a `CallEdge` for the
-affected candidate.
+Missing build context and recoverable TU parse failure do not erase complete
+Tree-sitter candidates. The query engine creates a syntactic fallback edge with
+`SyntacticCandidate` evidence, empty compilation-context provenance, and never
+`CONFIRMED` confidence. A successfully checked context may still reject an
+inactive or semantically mismatched candidate.
 
 Different call sites remain separate edges. Equivalent edges from different
 compilation contexts merge only when caller, callee, call site, kind, and
@@ -688,13 +694,13 @@ enum Confidence {
 }
 ```
 
-Construction rules are centralized in the Clang provider:
+Construction rules are shared by the query engine and Clang provider:
 
 | State | Construction rule |
 | --- | --- |
 | `Confirmed` | Clang resolves the exact canonical caller and callee reference at the call site in the active context. |
-| `Possible` | One or more identified targets are statically valid, but evidence cannot prove a unique runtime target. |
-| `Unresolved` | Semantic analysis completed, but no unique callee identity could be established from available evidence. |
+| `Possible` | A complete syntactic candidate has an identified target but no usable Clang context, or semantic evidence cannot prove a unique runtime target. |
+| `Unresolved` | Available syntactic or semantic evidence cannot identify a callee target. |
 
 Confidence is not treated as a numeric score. There is no averaging or
 automatic promotion when duplicate evidence is merged. `PROBABLE` has no enum
@@ -823,13 +829,15 @@ NFR-011–NFR-012, SRS RES-007.
 For `callers(target)`:
 
 1. Discovery locates symbol candidates matching the target query.
-2. Clang resolves them; zero or multiple viable selections produce the SRS
-   not-found or ambiguity outcome.
-3. The selected canonical target enters the reverse frontier at depth zero.
+2. Clang resolves them when possible. A successfully checked context may reject
+   inactive candidates; unavailable verification retains a complete syntactic
+   target identity.
+3. The selected semantic or syntactic target enters the reverse frontier at
+   depth zero.
 4. `calls_by_spelling` yields syntactic call sites that may name the frontier
    symbol; scope hints narrow but never prove the match.
 5. Candidate sites are deduplicated and grouped by compilation context.
-6. Clang verifies each group.
+6. Clang verifies each usable group; unavailable groups retain syntactic edges.
 7. Edges whose callee equals the frontier symbol, or whose possible target set
    contains it, are recorded. Their callers enter the next frontier unless
    already expanded at an equal or shallower depth.
@@ -842,10 +850,11 @@ For `callers(target)`:
 
 For `callees(source)`:
 
-1. Resolve the source to one canonical symbol.
+1. Resolve the source to one semantic symbol or complete syntactic candidate.
 2. Locate its candidate definition body.
 3. Read `calls_by_caller` for call sites within that body.
-4. Group and verify those sites by TU context.
+4. Group and verify those sites by TU context when available; otherwise retain
+   syntactic fallback edges.
 5. Record every qualified edge. Enqueue each known callee identity that passes
    the verified-only filter and has not been expanded at a shallower depth.
 6. Retain unresolved edges in results but do not enqueue them because they have
@@ -997,23 +1006,23 @@ FR-057, FR-064, FR-068–FR-071.
 | Failure | Handling | Result / status | SRS trace |
 | --- | --- | --- | --- |
 | Invalid CLI shape or option | Stop before project loading. | Diagnostic, non-zero. | FR-068–FR-069 |
-| Invalid source root or compilation database | Stop before discovery. | Diagnostic naming input, non-zero. | FR-003, FR-006–FR-010, FR-069 |
+| Invalid source root | Stop before discovery. | Diagnostic naming input, non-zero. | FR-003, FR-069 |
+| Missing or invalid compilation database | Record a recoverable diagnostic and continue without semantic contexts. | Tree-sitter candidate result, zero for a completed query. | FR-006–FR-011, FR-070 |
 | Symbol not found | Stop that query without traversal. | Distinct no-symbol diagnostic, non-zero. | FR-016, FR-069, FR-071 |
 | Ambiguous required symbol | Return all viable choices; do not select. | Ambiguity diagnostic, non-zero. | FR-015, FR-069, FR-071 |
-| Candidate lacks required build context | Record failed work without constructing an unresolved edge; continue independent batches. | Partial result with usable results and non-zero status, or analysis failure when none are usable. | FR-010–FR-011, FR-069, FR-080–FR-081 |
-| One required TU fails to parse | Cache failure, record affected work as unavailable, and continue independent TUs. | Partial result with usable results and non-zero status. | FR-004, FR-043, FR-069, FR-080–FR-081, NFR-014 |
-| Semantic analysis completes but no unique callee resolves | Emit possible targets when known or one unresolved edge when none is identifiable. | Successful query with zero status if no separate analysis work failed. | FR-046–FR-047, FR-049–FR-053, FR-070–FR-071, FR-079 |
+| Candidate lacks build context | Record a recoverable issue and retain complete syntactic candidates without confirmed confidence. | Completed candidate result; `--verified-only` may yield no result. | FR-010–FR-011, FR-024, FR-029, FR-070 |
+| One relevant TU fails to parse | Cache failure, record the issue, retain complete syntactic candidates, and continue independent TUs. | Completed mixed-confidence result when discovery succeeded. | FR-043, FR-070, NFR-014 |
+| Available evidence has no unique callee | Emit possible targets when known or one unresolved edge when none is identifiable. | Successful query with zero status. | FR-046–FR-047, FR-049–FR-053, FR-070–FR-071, FR-079 |
 | Clang terminates the process through an unrecoverable native fault | No partial result can be trusted or rendered after termination. | Operating-system non-zero termination; no persisted semantic state. | FR-069, NFR-008–NFR-009 |
 | User-supplied depth limit reached | Stop deeper expansion and retain bounded results. | `Truncated { max_depth }`, zero status, distinct truncation metadata. | FR-021, FR-027, FR-034–FR-035, FR-070–FR-071, FR-081 |
 | Complete search finds no result | Return empty completed result. | `NoResult`, zero status. | FR-033, FR-070–FR-071 |
 | Internal invariant violation | Stop affected analysis; never raise confidence. | Partial evidence if safe, internal diagnostic, non-zero. | FR-069, NFR-009, NFR-014 |
 | Output pipe closes | Stop rendering and release local state. | Non-zero I/O failure; no analysis mutation. | FR-069, NFR-020 |
 
-Partial output begins with an explicit incomplete-analysis diagnostic and lists
-the work that failed. It does not manufacture `UNRESOLVED` edges for work that
-could not be analyzed. Confirmed independent edges may still be displayed
-because their evidence remains valid. The renderer never labels a partial
-search as proof that no path exists.
+Recoverable semantic failure is represented by diagnostics plus non-confirmed
+syntactic evidence. `Partial` remains reserved for failures that prevent an
+otherwise safe result from being represented; the renderer never labels such a
+partial search as proof that no path exists.
 
 **SRS trace:** FR-004, FR-009–FR-011, FR-033, FR-035,
 FR-043, FR-046–FR-051, FR-069–FR-071, FR-079–FR-081,
@@ -1217,8 +1226,8 @@ NFR-009–NFR-012.
   same rendered order.
 - Instrument Clang parse attempts and assert at most one per `CompilationKey`.
 - Force one TU parse failure and assert unrelated confirmed edges remain valid,
-  affected work is reported unavailable rather than unresolved, output is
-  partial, and exit is non-zero.
+  affected complete syntactic candidates remain non-confirmed, diagnostics are
+  retained, and a completed default query exits zero.
 - Run cyclic fixtures under a timeout with omitted depth and several explicit
   bounds; assert explicit truncation exits zero.
 - Run an unresolved indirect-call query with no failed work and assert exit
@@ -1238,7 +1247,7 @@ FR-045, FR-069–FR-071, NFR-003–NFR-006, NFR-009–NFR-020.
 | ID | Decision | Rationale | Alternatives considered | SRS trace |
 | --- | --- | --- | --- | --- |
 | DD-001 | Use a single process with query-scoped in-memory state. | Simplest stale-safe cache; no sensitive persistent index; sufficient for PoC. | Persistent DB or daemon: deferred until measured reuse benefit exists. | NFR-008, NFR-013, NFR-019–NFR-021, SRS Section 6 |
-| DD-002 | Use Tree-sitter records only as candidates. | Fast reverse/forward narrowing without false semantic proof. | Tree-sitter-only edges: rejected by correctness and confidence requirements. | CON-005, CON-008, FR-042, NFR-009 |
+| DD-002 | Use complete Tree-sitter records as non-confirmed fallback candidates. | Keeps discovery usable when optional semantic context is unavailable without presenting syntax as proof. | Dropping candidates on Clang failure reverses the discovery-first architecture. | CON-005, CON-008, FR-024, FR-029, FR-042, NFR-009 |
 | DD-003 | Use Clang's C interfaces in-process. | Provides canonical cursors and USRs without parsing unstable textual output or adding a sidecar protocol. | AST JSON subprocess: unstable/large; C++ helper: extra executable/protocol; one Clang process per edge: excessive repeated work. | CON-008, FR-038–FR-045 |
 | DD-004 | Analyze every applicable normalized compilation context, parse each once, then merge equivalent edges with provenance. | Preserves configuration-dependent semantics without duplicating equivalent output. | Select one context: loses valid edges; group by source path alone: conflates configurations; parse per candidate: violates FR-045. | FR-008, FR-044–FR-045, FR-078 |
 | DD-005 | Keep candidate IDs and canonical symbol IDs as different types. | Makes accidental promotion of a textual match a type-level error. | One nullable ID type: permits unverified/verified confusion. | FR-013–FR-018, FR-038–FR-042 |
@@ -1315,8 +1324,8 @@ true:
 10. Future language work can replace discovery and semantic adapters without
     exposing backend identifiers to traversal, but no future backend or plugin
     system exists in the initial product.
-11. `UNRESOLVED` is created only after successful semantic analysis; failed
-    required work produces partial or failed analysis instead.
+11. Missing semantic context never creates confirmed evidence; complete
+    syntactic candidates remain `POSSIBLE` or `UNRESOLVED` with diagnostics.
 12. Every applicable compilation context is analyzed, equivalent edges merge
     with provenance, and `PROBABLE` has no initial representation.
 

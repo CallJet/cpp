@@ -312,6 +312,7 @@ impl SemanticProvider for ClangProvider {
                 return result;
             }
         };
+        result.context_checked = true;
 
         let target_candidates = batch.symbols;
 

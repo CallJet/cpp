@@ -2,14 +2,18 @@
 //! On-demand query and traversal engine module
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::diagnostic::{FatalError, QueryError};
+use crate::diagnostic::{
+    AnalysisCause, AnalysisIssue, Diagnostic, FatalError, QueryError, Severity,
+};
 use crate::discovery::DiscoveryIndex;
 use crate::model::{
-    CallEdge, CallEdgeId, CallKind, CallPath, CandidateCallId, CandidateSymbol,
-    CandidateSymbolKind, CompilationKey, Completion, Confidence, QueryMetrics, QueryRequest,
-    QueryResult, ResultCounts, Symbol, SymbolId, SymbolQuery, VerifiedEdgeKey,
+    BackendSymbolId, CallEdge, CallEdgeId, CallKind, CallPath, CandidateCallId, CandidateCallKind,
+    CandidateSymbol, CandidateSymbolKind, CompilationKey, Completion, Confidence, QueryMetrics,
+    QueryRequest, QueryResult, ResultCounts, Symbol, SymbolId, SymbolQuery, VerificationEvidence,
+    VerificationReason, VerifiedEdgeKey,
 };
 use crate::project::ProjectContext;
 use crate::semantic::{SemanticProvider, VerificationBatch};
@@ -45,6 +49,9 @@ pub struct QueryEngine<'a, S: SemanticProvider> {
     pub discovery: DiscoveryIndex,
     pub provider: S,
     progress: bool,
+    diagnostics: Vec<Diagnostic>,
+    missing_context_files: BTreeSet<PathBuf>,
+    next_fallback_edge_id: u32,
 }
 
 impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
@@ -55,6 +62,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             discovery: DiscoveryIndex::default(),
             provider,
             progress: false,
+            diagnostics: Vec::new(),
+            missing_context_files: BTreeSet::new(),
+            next_fallback_edge_id: u32::MAX,
         }
     }
 
@@ -66,6 +76,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
     /// 쿼리 요청 실행
     pub fn execute(&mut self, request: QueryRequest) -> Result<QueryResult, FatalError> {
+        self.diagnostics = self.project.compilation_db.diagnostics.clone();
+        self.missing_context_files.clear();
+        self.next_fallback_edge_id = u32::MAX;
         let total_start = Instant::now();
         let inspected_before = self.discovery.source_files_inspected;
         let parsed_before = self.discovery.source_files.len();
@@ -123,14 +136,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         let all_sources = &self.discovery.source_files;
         let mut verified_files = BTreeSet::new();
         for edge in &result.edges {
-            verified_files.insert(edge.callsite.start.file.clone());
-        }
-        for sym in result.symbols.values() {
-            if let Some(loc) = &sym.declaration {
-                verified_files.insert(loc.file.clone());
-            }
-            if let Some(loc) = &sym.definition {
-                verified_files.insert(loc.file.clone());
+            if !edge.contexts.is_empty() {
+                verified_files.insert(edge.callsite.start.file.clone());
             }
         }
 
@@ -146,6 +153,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
         let mut final_res = result;
         final_res.metrics = metrics;
+        final_res
+            .diagnostics
+            .extend(std::mem::take(&mut self.diagnostics));
 
         Ok(final_res)
     }
@@ -163,15 +173,9 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         let resolution =
             self.provider
                 .resolve_symbols(self.project, &self.discovery, &cand_ids);
+        self.record_analysis_issues(resolution.issues.clone());
 
         if resolution.symbols.is_empty() {
-            if resolution.failed_contexts > 0 {
-                return Err(FatalError::AnalysisFailed(format!(
-                    "심볼 '{}' 검증 중 {}개 컴파일 컨텍스트를 파싱하지 못했습니다.",
-                    query.raw, resolution.failed_contexts
-                )));
-            }
-
             // 관련 TU를 정상 파싱했지만 callable 커서가 하나도 없으면 해당
             // 빌드 구성에서 #if 등으로 비활성화된 구문 후보로 간주한다.
             if resolution.checked_contexts > 0 {
@@ -180,24 +184,43 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 }));
             }
 
-            // Clang에서 해석하지 못한 경우, 힌트 기반으로 임시 fallback 심볼 생성
-            // (연결 가능한 컴파일 컨텍스트 자체가 없을 때만 허용)
-            let first_cand = self.discovery.symbols.get(&cand_ids[0]).unwrap();
-            let (namespace, class_name) = candidate_scope_parts(first_cand);
-            let sym = Symbol {
-                id: SymbolId::clang_usr(first_cand.language, format!("usr:@{}", first_cand.name)),
-                name: first_cand.name.clone(),
-                qualified_name: first_cand
-                    .qualifier_hint
-                    .clone()
-                    .map(|q| format!("{q}{}", first_cand.name)),
-                namespace,
-                class_name,
-                signature: None,
-                declaration: Some(first_cand.declaration.start.clone()),
-                definition: None,
+            // Clang을 사용할 수 없거나 모든 관련 TU 파싱이 실패한 경우에도
+            // Tree-sitter의 완전한 구문 후보를 버리지 않는다.
+            let complete_candidates = cand_ids
+                .iter()
+                .filter_map(|id| self.discovery.symbols.get(id))
+                .cloned()
+                .filter(|candidate| candidate.syntax_complete)
+                .collect::<Vec<_>>();
+            let definitions = complete_candidates
+                .iter()
+                .filter(|candidate| candidate.definition_body.is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            let viable_candidates = if definitions.is_empty() {
+                &complete_candidates
+            } else {
+                &definitions
             };
-            return Ok(sym);
+            if viable_candidates.len() > 1 {
+                let candidates = viable_candidates
+                    .iter()
+                    .map(candidate_display_name_with_location)
+                    .collect::<Vec<_>>();
+                return Err(FatalError::Query(QueryError::AmbiguousSymbol {
+                    query: query.raw.clone(),
+                    candidates,
+                }));
+            }
+            let first_cand = viable_candidates.first().cloned().ok_or_else(|| {
+                FatalError::Query(QueryError::SymbolNotFound {
+                    query: query.raw.clone(),
+                })
+            })?;
+            if resolution.failed_contexts == 0 {
+                self.record_missing_symbol_context(&first_cand);
+            }
+            return Ok(candidate_to_symbol(&first_cand));
         }
 
         if resolution.symbols.len() > 1 {
@@ -213,6 +236,162 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         }
 
         Ok(resolution.symbols[0].clone())
+    }
+
+    fn record_analysis_issues(&mut self, issues: Vec<AnalysisIssue>) {
+        for issue in issues {
+            let diagnostic = Diagnostic::analysis(issue);
+            if !self.diagnostics.contains(&diagnostic) {
+                self.diagnostics.push(diagnostic);
+            }
+        }
+    }
+
+    fn record_missing_context(&mut self, call_id: CandidateCallId) {
+        let Some(location) = self
+            .discovery
+            .calls
+            .get(&call_id)
+            .map(|call| call.expression.start.clone())
+        else {
+            return;
+        };
+        if !self.missing_context_files.insert(location.file.clone()) {
+            return;
+        }
+        self.record_analysis_issues(vec![AnalysisIssue {
+            severity: Severity::Recoverable,
+            context: None,
+            location: Some(location),
+            message: "연결된 컴파일 컨텍스트가 없어 Tree-sitter 호출 후보를 유지합니다."
+                .to_string(),
+            cause: AnalysisCause::MissingCompilationContext,
+        }]);
+    }
+
+    fn record_missing_symbol_context(&mut self, candidate: &CandidateSymbol) {
+        if !self
+            .missing_context_files
+            .insert(candidate.declaration.start.file.clone())
+        {
+            return;
+        }
+        self.record_analysis_issues(vec![AnalysisIssue {
+            severity: Severity::Recoverable,
+            context: None,
+            location: Some(candidate.declaration.start.clone()),
+            message: format!(
+                "심볼 '{}'에 연결된 컴파일 컨텍스트가 없어 Tree-sitter 후보를 유지합니다.",
+                candidate.name
+            ),
+            cause: AnalysisCause::MissingCompilationContext,
+        }]);
+    }
+
+    fn fallback_edges_for_call(
+        &mut self,
+        call_id: CandidateCallId,
+        forced_caller: Option<&Symbol>,
+        forced_callee: Option<&Symbol>,
+    ) -> Vec<(CallEdge, Symbol, Option<Symbol>)> {
+        let Some(call) = self.discovery.calls.get(&call_id).cloned() else {
+            return Vec::new();
+        };
+        if !call.syntax_complete {
+            return Vec::new();
+        }
+
+        let caller = forced_caller.cloned().or_else(|| {
+            self.discovery
+                .symbols
+                .get(&call.caller)
+                .filter(|candidate| candidate.syntax_complete)
+                .map(candidate_to_symbol)
+        });
+        let Some(caller) = caller else {
+            return Vec::new();
+        };
+
+        let mut callees = if let Some(callee) = forced_callee {
+            vec![callee.clone()]
+        } else {
+            self.discovery
+                .discover_spelling(self.project, &call.callee_spelling);
+            let raw_query = call
+                .qualifier_hint
+                .as_deref()
+                .map(|qualifier| format!("{qualifier}{}", call.callee_spelling))
+                .unwrap_or_else(|| call.callee_spelling.clone());
+            let query = SymbolQuery::parse(&raw_query);
+            self.discovery
+                .matching_symbols(&query)
+                .iter()
+                .filter_map(|id| self.discovery.symbols.get(id))
+                .filter(|candidate| candidate.syntax_complete)
+                .map(candidate_to_symbol)
+                .collect::<Vec<_>>()
+        };
+        callees.sort_by(|left, right| left.id.cmp(&right.id));
+        callees.dedup_by(|left, right| left.id == right.id);
+
+        let syntactic_kind = match call.syntax_hint {
+            CandidateCallKind::Direct | CandidateCallKind::Qualified => CallKind::Direct,
+            CandidateCallKind::Member | CandidateCallKind::Other => CallKind::Unresolved,
+        };
+        let callee_options = if callees.is_empty() {
+            vec![None]
+        } else {
+            callees.into_iter().map(Some).collect()
+        };
+
+        callee_options
+            .into_iter()
+            .map(|callee| {
+                let confidence = if callee.is_some() {
+                    Confidence::Possible
+                } else {
+                    Confidence::Unresolved
+                };
+                let evidence_key = CompilationKey("tree-sitter-fallback".to_string());
+                let mut evidence_by_context = BTreeMap::new();
+                evidence_by_context.insert(
+                    evidence_key,
+                    VerificationEvidence {
+                        expression_text: call.expression_text.clone(),
+                        static_target: None,
+                        candidate_targets: callee.iter().cloned().collect(),
+                        clang_diagnostics: Vec::new(),
+                        reason: VerificationReason::SyntacticCandidate,
+                        spelling_location: call
+                            .callee_location
+                            .clone()
+                            .or_else(|| Some(call.expression.start.clone())),
+                        expansion_location: Some(call.expression.start.clone()),
+                        is_virtual: false,
+                        is_template_related: false,
+                        is_macro_expanded: false,
+                    },
+                );
+
+                let edge = CallEdge {
+                    id: self.allocate_fallback_edge_id(),
+                    caller: caller.id.clone(),
+                    callee: callee.as_ref().map(|symbol| symbol.id.clone()),
+                    callsite: call.expression.clone(),
+                    kind: syntactic_kind,
+                    confidence,
+                    contexts: BTreeSet::new(),
+                    evidence_by_context,
+                };
+                (edge, caller.clone(), callee)
+            })
+            .collect()
+    }
+
+    fn allocate_fallback_edge_id(&mut self) -> CallEdgeId {
+        let id = CallEdgeId(self.next_fallback_edge_id);
+        self.next_fallback_edge_id = self.next_fallback_edge_id.saturating_sub(1);
+        id
     }
 
     /// callers 쿼리 실행 (온디맨드 역방향 탐색)
@@ -296,8 +475,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
             // 2. 컴파일 컨텍스트별 그룹화
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
+            let mut fallback_calls = candidate_calls.iter().copied().collect::<BTreeSet<_>>();
             for &call_id in &candidate_calls {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
+                if contexts.is_empty() {
+                    self.record_missing_context(call_id);
+                }
                 for ctx_key in contexts {
                     batches.entry(ctx_key).or_default().push(call_id);
                 }
@@ -314,15 +497,22 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                         calls.len()
                     );
                 }
-                verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
-                    context: ctx_key,
+                    context: ctx_key.clone(),
                     symbols: target_candidates.clone(),
-                    calls,
+                    calls: calls.clone(),
                 };
                 let ver_res =
                     self.provider
                         .verify_calls(self.project, &self.discovery, batch);
+                let context_checked = ver_res.context_checked;
+                self.record_analysis_issues(ver_res.issues);
+                if context_checked {
+                    verified_tu_keys.insert(ctx_key);
+                    for call_id in &calls {
+                        fallback_calls.remove(call_id);
+                    }
+                }
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
@@ -333,14 +523,17 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     }
 
                     // 피호출자가 현재 심볼과 매칭되는지 확인
-                    let matches_callee = edge_targets_symbol(&edge, &item.symbol)
+                    let targets_current = edge_targets_symbol(&edge, &cur_sym, &symbols_map);
+                    let matches_callee = targets_current
                         || (edge.callee.is_none()
                             && edge.confidence == Confidence::Unresolved);
 
                     if matches_callee {
                         // 정적 참조가 base virtual 메서드여도 요청 대상이 같은 override
                         // family라면 쿼리 결과 엣지는 실제 요청 대상으로 연결한다.
-                        if edge.kind == CallKind::Virtual
+                        if targets_current
+                            && (edge.kind == CallKind::Virtual
+                                || is_tree_sitter_symbol(&cur_sym))
                             && edge.callee.as_ref() != Some(&item.symbol)
                         {
                             edge.callee = Some(item.symbol.clone());
@@ -373,6 +566,43 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                             None => true,
                         };
 
+                        if should_enqueue {
+                            state.best_depth.insert(caller_id.clone(), next_depth);
+                            state.frontier.push_back(FrontierItem {
+                                symbol: caller_id,
+                                depth: next_depth,
+                                predecessor: Some((item.symbol.clone(), CallEdgeId(0))),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if !verified_only {
+                for call_id in fallback_calls {
+                    for (edge, caller, callee) in
+                        self.fallback_edges_for_call(call_id, None, Some(&cur_sym))
+                    {
+                        let caller_id = caller.id.clone();
+                        symbols_map.entry(caller.id.clone()).or_insert(caller);
+                        if let Some(callee) = callee {
+                            symbols_map.entry(callee.id.clone()).or_insert(callee);
+                        }
+
+                        let edge_key = VerifiedEdgeKey {
+                            caller: edge.caller.clone(),
+                            callee: edge.callee.clone(),
+                            callsite: edge.callsite.clone(),
+                            kind: edge.kind,
+                            confidence: edge.confidence,
+                        };
+                        state.edges.entry(edge_key).or_insert(edge);
+
+                        let next_depth = item.depth + 1;
+                        let should_enqueue = match state.best_depth.get(&caller_id) {
+                            Some(&depth) => next_depth < depth,
+                            None => true,
+                        };
                         if should_enqueue {
                             state.best_depth.insert(caller_id.clone(), next_depth);
                             state.frontier.push_back(FrontierItem {
@@ -509,8 +739,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
             // 2. 컴파일 컨텍스트 그룹화
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
+            let mut fallback_calls = calls_to_verify.iter().copied().collect::<BTreeSet<_>>();
             for &call_id in &calls_to_verify {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
+                if contexts.is_empty() {
+                    self.record_missing_context(call_id);
+                }
                 for ctx_key in contexts {
                     batches.entry(ctx_key).or_default().push(call_id);
                 }
@@ -527,21 +761,35 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                         calls.len()
                     );
                 }
-                verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
-                    context: ctx_key,
+                    context: ctx_key.clone(),
                     symbols: Vec::new(),
-                    calls,
+                    calls: calls.clone(),
                 };
                 let ver_res =
                     self.provider
                         .verify_calls(self.project, &self.discovery, batch);
+                let context_checked = ver_res.context_checked;
+                self.record_analysis_issues(ver_res.issues);
+                if context_checked {
+                    verified_tu_keys.insert(ctx_key);
+                    for call_id in &calls {
+                        fallback_calls.remove(call_id);
+                    }
+                }
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
-                for edge in ver_res.edges {
+                for mut edge in ver_res.edges {
                     if verified_only && edge.confidence != Confidence::Confirmed {
                         continue;
+                    }
+
+                    if !edge_caller_matches_symbol(&edge, &cur_sym, &symbols_map) {
+                        continue;
+                    }
+                    if edge.caller != item.symbol {
+                        edge.caller = item.symbol.clone();
                     }
 
                     let edge_key = VerifiedEdgeKey {
@@ -579,6 +827,45 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                                 depth: next_depth,
                                 predecessor: Some((item.symbol.clone(), CallEdgeId(0))),
                             });
+                        }
+                    }
+                }
+            }
+
+            if !verified_only {
+                for call_id in fallback_calls {
+                    for (edge, caller, callee) in
+                        self.fallback_edges_for_call(call_id, Some(&cur_sym), None)
+                    {
+                        let edge_key = VerifiedEdgeKey {
+                            caller: edge.caller.clone(),
+                            callee: edge.callee.clone(),
+                            callsite: edge.callsite.clone(),
+                            kind: edge.kind,
+                            confidence: edge.confidence,
+                        };
+                        let edge_id = edge.id;
+                        let callee_id = callee.as_ref().map(|symbol| symbol.id.clone());
+                        symbols_map.entry(caller.id.clone()).or_insert(caller);
+                        if let Some(callee) = callee {
+                            symbols_map.entry(callee.id.clone()).or_insert(callee);
+                        }
+                        state.edges.entry(edge_key).or_insert(edge);
+
+                        if let Some(callee_id) = callee_id {
+                            let next_depth = item.depth + 1;
+                            let should_enqueue = match state.best_depth.get(&callee_id) {
+                                Some(&depth) => next_depth < depth,
+                                None => true,
+                            };
+                            if should_enqueue {
+                                state.best_depth.insert(callee_id.clone(), next_depth);
+                                state.frontier.push_back(FrontierItem {
+                                    symbol: callee_id,
+                                    depth: next_depth,
+                                    predecessor: Some((item.symbol.clone(), edge_id)),
+                                });
+                            }
                         }
                     }
                 }
@@ -731,8 +1018,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             }
 
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
+            let mut fallback_calls = calls_to_verify.iter().copied().collect::<BTreeSet<_>>();
             for &call_id in &calls_to_verify {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
+                if contexts.is_empty() {
+                    self.record_missing_context(call_id);
+                }
                 for ctx_key in contexts {
                     batches.entry(ctx_key).or_default().push(call_id);
                 }
@@ -747,15 +1038,22 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                         calls.len()
                     );
                 }
-                verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
-                    context: ctx_key,
+                    context: ctx_key.clone(),
                     symbols: target_candidates.clone(),
-                    calls,
+                    calls: calls.clone(),
                 };
                 let ver_res =
                     self.provider
                         .verify_calls(self.project, &self.discovery, batch);
+                let context_checked = ver_res.context_checked;
+                self.record_analysis_issues(ver_res.issues);
+                if context_checked {
+                    verified_tu_keys.insert(ctx_key);
+                    for call_id in &calls {
+                        fallback_calls.remove(call_id);
+                    }
+                }
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
@@ -764,8 +1062,15 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                         continue;
                     }
 
-                    if edge.kind == CallKind::Virtual
-                        && edge_targets_symbol(&edge, &target_sym.id)
+                    if !edge_caller_matches_symbol(&edge, &cur_sym, &symbols_map) {
+                        continue;
+                    }
+                    if edge.caller != item.symbol {
+                        edge.caller = item.symbol.clone();
+                    }
+
+                    if (edge.kind == CallKind::Virtual || is_tree_sitter_symbol(&target_sym))
+                        && edge_targets_symbol(&edge, &target_sym, &symbols_map)
                         && edge.callee.as_ref() != Some(&target_sym.id)
                     {
                         edge.callee = Some(target_sym.id.clone());
@@ -802,6 +1107,56 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                                 depth: next_depth,
                                 predecessor: Some((item.symbol.clone(), edge_id)),
                             });
+                        }
+                    }
+                }
+            }
+
+            if !verified_only {
+                for call_id in fallback_calls {
+                    let forced_target = self
+                        .discovery
+                        .calls
+                        .get(&call_id)
+                        .filter(|call| call_may_target_symbol(call, &target_sym))
+                        .map(|_| &target_sym);
+                    for (edge, caller, callee) in self.fallback_edges_for_call(
+                        call_id,
+                        Some(&cur_sym),
+                        forced_target,
+                    ) {
+                        let edge_key = VerifiedEdgeKey {
+                            caller: edge.caller.clone(),
+                            callee: edge.callee.clone(),
+                            callsite: edge.callsite.clone(),
+                            kind: edge.kind,
+                            confidence: edge.confidence,
+                        };
+                        let edge_id = edge.id;
+                        let callee_id = callee.as_ref().map(|symbol| symbol.id.clone());
+                        symbols_map.entry(caller.id.clone()).or_insert(caller);
+                        if let Some(callee) = callee {
+                            symbols_map.entry(callee.id.clone()).or_insert(callee);
+                        }
+                        state.edges.entry(edge_key).or_insert(edge);
+
+                        if let Some(callee_id) = callee_id {
+                            let next_depth = item.depth + 1;
+                            let should_enqueue = match state.best_depth.get(&callee_id) {
+                                Some(&depth) => next_depth < depth,
+                                None => true,
+                            };
+                            if should_enqueue {
+                                state.best_depth.insert(callee_id.clone(), next_depth);
+                                state
+                                    .predecessors
+                                    .insert(callee_id.clone(), (item.symbol.clone(), edge_id));
+                                state.frontier.push_back(FrontierItem {
+                                    symbol: callee_id,
+                                    depth: next_depth,
+                                    predecessor: Some((item.symbol.clone(), edge_id)),
+                                });
+                            }
                         }
                     }
                 }
@@ -921,8 +1276,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
         let mut verified_edges = Vec::new();
         let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
+        let mut fallback_calls = calls_to_verify.iter().copied().collect::<BTreeSet<_>>();
         for &call_id in &calls_to_verify {
             let contexts = self.discovery.contexts_for(call_id, self.project);
+            if contexts.is_empty() {
+                self.record_missing_context(call_id);
+            }
             for ctx_key in contexts {
                 batches.entry(ctx_key).or_default().push(call_id);
             }
@@ -932,15 +1291,28 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let batch = VerificationBatch {
                 context: ctx_key,
                 symbols: target_candidates.clone(),
-                calls,
+                calls: calls.clone(),
             };
             let ver_res =
                 self.provider
                     .verify_calls(self.project, &self.discovery, batch);
+            let context_checked = ver_res.context_checked;
+            self.record_analysis_issues(ver_res.issues);
+            if context_checked {
+                for call_id in &calls {
+                    fallback_calls.remove(call_id);
+                }
+            }
             record_verified_symbols(&mut symbols_map, ver_res.symbols);
             for mut edge in ver_res.edges {
-                if edge_targets_symbol(&edge, &callee_sym.id) {
-                    if edge.kind == CallKind::Virtual
+                if !edge_caller_matches_symbol(&edge, &caller_sym, &symbols_map) {
+                    continue;
+                }
+                if edge.caller != caller_sym.id {
+                    edge.caller = caller_sym.id.clone();
+                }
+                if edge_targets_symbol(&edge, &callee_sym, &symbols_map) {
+                    if (edge.kind == CallKind::Virtual || is_tree_sitter_symbol(&callee_sym))
                         && edge.callee.as_ref() != Some(&callee_sym.id)
                     {
                         edge.callee = Some(callee_sym.id.clone());
@@ -948,6 +1320,20 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     record_symbols_from_edge(&mut symbols_map, &edge);
                     verified_edges.push(edge);
                 }
+            }
+        }
+
+        for call_id in fallback_calls {
+            for (edge, caller, callee) in self.fallback_edges_for_call(
+                call_id,
+                Some(&caller_sym),
+                Some(&callee_sym),
+            ) {
+                symbols_map.entry(caller.id.clone()).or_insert(caller);
+                if let Some(callee) = callee {
+                    symbols_map.entry(callee.id.clone()).or_insert(callee);
+                }
+                verified_edges.push(edge);
             }
         }
 
@@ -969,6 +1355,57 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             metrics: metrics.clone(),
         })
     }
+}
+
+fn call_may_target_symbol(call: &crate::model::CandidateCallSite, target: &Symbol) -> bool {
+    if call.callee_spelling != target.name {
+        return false;
+    }
+
+    let Some(call_qualifier) = call.qualifier_hint.as_deref() else {
+        return true;
+    };
+    let target_qualifier = target
+        .qualified_name
+        .as_deref()
+        .and_then(|name| name.rfind("::").map(|index| &name[..index + 2]));
+    target_qualifier == Some(call_qualifier)
+}
+
+fn candidate_to_symbol(candidate: &CandidateSymbol) -> Symbol {
+    let qualified_name = candidate
+        .qualifier_hint
+        .as_deref()
+        .map(|qualifier| format!("{qualifier}{}", candidate.name))
+        .unwrap_or_else(|| candidate.name.clone());
+    let (namespace, class_name) = candidate_scope_parts(candidate);
+    Symbol {
+        id: SymbolId::tree_sitter_fallback(
+            candidate.language,
+            candidate.declaration.start.clone(),
+            format!("{:?}", candidate.syntactic_kind),
+            qualified_name.clone(),
+        ),
+        name: candidate.name.clone(),
+        qualified_name: Some(qualified_name),
+        namespace,
+        class_name,
+        signature: candidate.signature_hint.clone(),
+        declaration: Some(candidate.declaration.start.clone()),
+        definition: candidate
+            .definition_body
+            .as_ref()
+            .map(|range| range.start.clone()),
+    }
+}
+
+fn candidate_display_name_with_location(candidate: &CandidateSymbol) -> String {
+    let name = candidate
+        .qualifier_hint
+        .as_deref()
+        .map(|qualifier| format!("{qualifier}{}", candidate.name))
+        .unwrap_or_else(|| candidate.name.clone());
+    format!("{name} at {}", candidate.declaration.start)
 }
 
 /// Tree-sitter 후보 한정자에서 출력용 네임스페이스/클래스 힌트를 분리한다.
@@ -1112,17 +1549,90 @@ fn record_symbols_from_edge(symbols_map: &mut BTreeMap<SymbolId, Symbol>, edge: 
 }
 
 /// 정적 대상 또는 virtual override 후보 집합에 요청 심볼이 포함되는지 확인한다.
-fn edge_targets_symbol(edge: &CallEdge, target: &SymbolId) -> bool {
-    if edge.callee.as_ref() == Some(target) {
+///
+/// Clang을 사용할 수 없었던 이전 단계에서 생성된 Tree-sitter 심볼은 이후 단계의
+/// Clang USR과 ID가 다르므로, 이 경우에만 한정 이름을 보조 연결 키로 사용한다.
+fn edge_targets_symbol(
+    edge: &CallEdge,
+    target: &Symbol,
+    symbols: &BTreeMap<SymbolId, Symbol>,
+) -> bool {
+    if edge.callee.as_ref() == Some(&target.id) {
         return true;
     }
 
-    edge.evidence_by_context.values().any(|evidence| {
+    if edge.evidence_by_context.values().any(|evidence| {
         evidence
             .candidate_targets
             .iter()
-            .any(|candidate| &candidate.id == target)
-    })
+            .any(|candidate| candidate.id == target.id)
+    }) {
+        return true;
+    }
+
+    if !is_tree_sitter_symbol(target) {
+        return false;
+    }
+
+    let callee_matches = edge
+        .callee
+        .as_ref()
+        .and_then(|id| symbols.get(id))
+        .is_some_and(|callee| symbols_match_syntactically(callee, target));
+    callee_matches
+        || edge.evidence_by_context.values().any(|evidence| {
+            evidence
+                .static_target
+                .iter()
+                .chain(evidence.candidate_targets.iter())
+                .any(|candidate| symbols_match_syntactically(candidate, target))
+        })
+}
+
+/// 순방향 검증 엣지가 현재 Tree-sitter/Clang 호출자와 같은 심볼인지 확인한다.
+fn edge_caller_matches_symbol(
+    edge: &CallEdge,
+    caller: &Symbol,
+    symbols: &BTreeMap<SymbolId, Symbol>,
+) -> bool {
+    if edge.caller == caller.id {
+        return true;
+    }
+    if !is_tree_sitter_symbol(caller) {
+        return false;
+    }
+
+    symbols
+        .get(&edge.caller)
+        .is_some_and(|verified| symbols_match_syntactically(verified, caller))
+}
+
+fn is_tree_sitter_symbol(symbol: &Symbol) -> bool {
+    matches!(
+        &symbol.id.backend_id,
+        BackendSymbolId::TreeSitterLocationFallback { .. }
+    )
+}
+
+fn symbols_match_syntactically(left: &Symbol, right: &Symbol) -> bool {
+    if left.name != right.name {
+        return false;
+    }
+
+    match (
+        meaningful_qualifier(left),
+        meaningful_qualifier(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn meaningful_qualifier(symbol: &Symbol) -> Option<&str> {
+    symbol
+        .qualified_name
+        .as_deref()
+        .filter(|qualified| *qualified != symbol.name.as_str())
 }
 
 /// 결과 요약 통계 계산

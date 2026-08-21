@@ -224,6 +224,12 @@ pub enum BackendSymbolId {
         qualified_name: String,
         signature: Option<String>,
     },
+    /// Clang 검증을 사용할 수 없을 때의 Tree-sitter 위치 기반 식별자
+    TreeSitterLocationFallback {
+        declaration: SourceLocation,
+        syntactic_kind: String,
+        qualified_name: String,
+    },
 }
 
 /// 언어 중립적 정규 심볼 식별자 (Canonical Symbol ID)
@@ -241,6 +247,23 @@ impl SymbolId {
         Self {
             language,
             backend_id: BackendSymbolId::ClangUsr(usr.into()),
+        }
+    }
+
+    /// Tree-sitter 후보의 위치와 한정 이름으로 안정적인 fallback ID 생성
+    pub fn tree_sitter_fallback(
+        language: Language,
+        declaration: SourceLocation,
+        syntactic_kind: impl Into<String>,
+        qualified_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            language,
+            backend_id: BackendSymbolId::TreeSitterLocationFallback {
+                declaration,
+                syntactic_kind: syntactic_kind.into(),
+                qualified_name: qualified_name.into(),
+            },
         }
     }
 }
@@ -285,9 +308,9 @@ impl Symbol {
 pub enum Confidence {
     /// 시맨틱 증거로 고유한 피호출자가 완전히 확정됨 (Confirmed)
     Confirmed,
-    /// 정적으로 유효한 후보이나 런타임 대상이 유일하게 확정되지 않음 (Possible)
+    /// 구문상 가능한 후보이거나 런타임 대상이 유일하게 확정되지 않음 (Possible)
     Possible,
-    /// 시맨틱 분석은 완료되었으나 고유 대상을 식별할 수 없음 (Unresolved)
+    /// 사용 가능한 구문/시맨틱 근거로 대상 식별자를 찾을 수 없음 (Unresolved)
     Unresolved,
 }
 
@@ -349,6 +372,8 @@ pub enum VerificationReason {
     AmbiguousReference,
     /// 외부 경계
     ForeignBoundary,
+    /// Clang 검증 없이 유지된 Tree-sitter 구문 후보
+    SyntacticCandidate,
 }
 
 /// 시맨틱 진단 정보

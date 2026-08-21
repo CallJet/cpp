@@ -76,9 +76,11 @@ impl HumanRenderer {
     ) -> RenderedOutput {
         let mut stderr = String::new();
 
-        // 1. 진단 메시지 출력 (stderr)
-        for diag in &result.diagnostics {
-            stderr.push_str(&format!("{diag}\n"));
+        // 1. 일반 모드는 함수명만 출력하고, 복구 가능한 진단은 verbose에서만 표시한다.
+        if options.verbosity > 0 {
+            for diag in &result.diagnostics {
+                stderr.push_str(&format!("{diag}\n"));
+            }
         }
 
         // 2. 부분 분석 실패 안내 (FR-080, FR-081)
@@ -275,7 +277,7 @@ impl HumanRenderer {
             let total_count = verified_count + skipped_count;
 
             stdout.push_str(&format!(
-                "\n[상세 번역 단위(TU) 리포트]\n• 번역 단위: 총 {total_count}개 중 {verified_count}개 시맨틱 검증, {skipped_count}개 파싱 생략(Skipped)\n"
+                "\n[상세 번역 단위(TU) 리포트]\n• 번역 단위: 총 {total_count}개 중 {verified_count}개 시맨틱 검증, {skipped_count}개 Clang 검증 생략(Skipped)\n"
             ));
 
             if !result.metrics.verified_source_files.is_empty() {
@@ -286,7 +288,7 @@ impl HumanRenderer {
             }
 
             if !result.metrics.skipped_source_files.is_empty() {
-                stdout.push_str("• 파싱 생략된 소스 파일:\n");
+                stdout.push_str("• Clang 검증을 생략한 소스 파일:\n");
                 for f in &result.metrics.skipped_source_files {
                     stdout.push_str(&format!("    - {}\n", project.display_path(f).display()));
                 }
@@ -623,6 +625,15 @@ impl HumanRenderer {
                 ..
             } => {
                 canonical_declaration.file.hash(&mut hasher);
+                qualified_name.hash(&mut hasher);
+            }
+            BackendSymbolId::TreeSitterLocationFallback {
+                declaration,
+                syntactic_kind,
+                qualified_name,
+            } => {
+                declaration.hash(&mut hasher);
+                syntactic_kind.hash(&mut hasher);
                 qualified_name.hash(&mut hasher);
             }
         }

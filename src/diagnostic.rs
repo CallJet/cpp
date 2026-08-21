@@ -124,7 +124,7 @@ impl std::error::Error for QueryError {}
 pub enum AnalysisCause {
     /// 번역 단위(TU) 파싱 실패
     TranslationUnitParseFailed,
-    /// 필수 컴파일 컨텍스트 누락
+    /// 시맨틱 검증용 컴파일 컨텍스트 누락
     MissingCompilationContext,
     /// 소스 파일 읽기 실패
     SourceReadFailed,

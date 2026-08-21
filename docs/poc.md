@@ -27,7 +27,7 @@ main
 ## Required inputs
 
 - C or C++ source root
-- valid `compile_commands.json`
+- optional valid `compile_commands.json` for confirmed semantic results
 - target function name
 - optional source function for a path query
 - optional maximum search depth
@@ -36,14 +36,16 @@ main
 
 The PoC must:
 
-1. Load and validate the compilation database.
+1. Load and validate an optional compilation database without making it a
+   prerequisite for Tree-sitter discovery.
 2. Parse project source with Tree-sitter to identify functions and call sites.
 3. Accept a target function and report ambiguous matches.
 4. Find candidate callers using the lightweight discovery data.
 5. Associate candidates with translation units.
 6. Group verification work by translation unit.
-7. Use Clang to resolve relevant call sites.
-8. Traverse verified callers recursively with cycle and depth protection.
+7. Use Clang to resolve relevant call sites when their build context is usable.
+8. Retain complete Tree-sitter candidates as non-confirmed when Clang is
+   unavailable, then traverse with cycle and depth protection.
 9. Print at least one call path with source locations.
 10. Distinguish confirmed edges from unresolved relationships.
 11. Run entirely locally without network access.
@@ -71,8 +73,8 @@ Human-readable output must include:
 - file and line for each edge or node
 - confidence for any non-confirmed edge
 - total confirmed and unresolved edge counts
-- a clear message for no path, ambiguous input, invalid compilation database,
-  and depth-limit exhaustion
+- a clear message for no path, ambiguous input, recoverable compilation
+  database problems, and depth-limit exhaustion
 
 The PoC may choose tree or linear rendering. Machine-readable JSON output is
 deferred until a consumer requires it.
@@ -106,8 +108,9 @@ The PoC succeeds when all of the following are demonstrated on the fixture:
 - Omitting maximum depth applies no logical depth limit while cycle detection
   still guarantees termination on finite input.
 - Reaching an explicit depth limit returns a successful truncated result.
-- An unresolved-only query succeeds; failure of required analysis work returns
-  partial output when usable results exist and uses a non-zero status.
+- An unresolved-only query succeeds; unavailable semantic verification retains
+  complete syntactic candidates as non-confirmed and a completed query exits
+  zero.
 - Multiple compilation contexts are all analyzed and remain attributable in
   merged output.
 - Output contains navigable source locations.
@@ -144,7 +147,7 @@ units for a focused query.
 
 ## Implementation order
 
-1. Compile database loading and fixture.
+1. Optional compile database loading and fixture.
 2. Tree-sitter function and call-site discovery.
 3. Target lookup and candidate caller search.
 4. TU-batched Clang verification.

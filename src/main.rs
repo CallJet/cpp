@@ -5,8 +5,7 @@ use clap::Parser;
 use std::process;
 
 use calljet::cli::Cli;
-use calljet::console::{missing_compilation_database_help, CALLJET_ASCII_ART};
-use calljet::diagnostic::InputError;
+use calljet::console::CALLJET_ASCII_ART;
 use calljet::project::ProjectContext;
 use calljet::query::QueryEngine;
 use calljet::render::HumanRenderer;
@@ -43,12 +42,6 @@ fn main() {
                 eprintln!("[CallJet] loading project...");
             }
             eprintln!("[CallJet] project initialization failed: {err}");
-            if let InputError::InvalidCompilationDatabase { path, .. } = &err {
-                if !path.exists() {
-                    eprintln!();
-                    eprintln!("{}", missing_compilation_database_help(path));
-                }
-            }
             process::exit(1);
         }
     };
