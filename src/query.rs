@@ -582,9 +582,14 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                     // 피호출자가 현재 심볼과 매칭되는지 확인
                     let targets_current = edge_targets_symbol(&edge, &cur_sym, &symbols_map);
-                    let matches_callee = targets_current
-                        || (edge.callee.is_none()
-                            && edge.confidence == Confidence::Unresolved);
+                    let unresolved_candidate = edge.callee.is_none()
+                        && edge.confidence == Confidence::Unresolved;
+                    // 대상 ID가 없는 unresolved 결과는 callers의 1-hop 구문
+                    // 근거로만 유지한다. 현재 피호출자와 연결된 엣지가
+                    // 아니므로 trace에 포함하거나 역방향 프론티어를 늘리면
+                    // 관계없는 caller까지 연쇄적으로 확장된다.
+                    let matches_callee =
+                        targets_current || (!include_paths && unresolved_candidate);
 
                     if matches_callee {
                         // 정적 참조가 base virtual 메서드여도 요청 대상이 같은 override
@@ -617,20 +622,23 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                             state.edges.insert(edge_key, edge);
                         }
 
-                        // 다음 프론티어 enqueue (사이클 및 최적 깊이 관리)
-                        let next_depth = item.depth + 1;
-                        let should_enqueue = match state.best_depth.get(&caller_id) {
-                            Some(&d) => next_depth < d,
-                            None => true,
-                        };
+                        // 실제 대상을 현재 심볼로 확인한 엣지만 다음
+                        // 프론티어로 확장한다.
+                        if targets_current {
+                            let next_depth = item.depth + 1;
+                            let should_enqueue = match state.best_depth.get(&caller_id) {
+                                Some(&d) => next_depth < d,
+                                None => true,
+                            };
 
-                        if should_enqueue {
-                            state.best_depth.insert(caller_id.clone(), next_depth);
-                            state.frontier.push_back(FrontierItem {
-                                symbol: caller_id,
-                                depth: next_depth,
-                                predecessor: Some((item.symbol.clone(), CallEdgeId(0))),
-                            });
+                            if should_enqueue {
+                                state.best_depth.insert(caller_id.clone(), next_depth);
+                                state.frontier.push_back(FrontierItem {
+                                    symbol: caller_id,
+                                    depth: next_depth,
+                                    predecessor: Some((item.symbol.clone(), CallEdgeId(0))),
+                                });
+                            }
                         }
                     }
                 }
@@ -1498,7 +1506,16 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
     let mut callers = BTreeSet::new();
     let mut callees = BTreeSet::new();
 
-    for edge in edges {
+    let mut ordered_edges = edges.iter().collect::<Vec<_>>();
+    ordered_edges.sort_by(|left, right| {
+        left.caller
+            .cmp(&right.caller)
+            .then_with(|| left.callsite.cmp(&right.callsite))
+            .then_with(|| left.callee.cmp(&right.callee))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    for edge in ordered_edges {
         let Some(callee) = &edge.callee else {
             continue;
         };
@@ -1512,8 +1529,8 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
     }
 
     for next in adjacency.values_mut() {
-        next.sort();
-        next.dedup();
+        let mut seen = BTreeSet::new();
+        next.retain(|(callee, _)| seen.insert(callee.clone()));
     }
 
     let mut roots = callers

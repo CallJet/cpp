@@ -1,7 +1,7 @@
 //! 사용자 출력 렌더링 모듈
 //! User output rendering module
 
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
@@ -230,10 +230,7 @@ impl HumanRenderer {
             // 2. 엣지 목록 렌더링 (callers, callees, explain)
             stdout.push_str("=== 호출 관계 (Call Edges) ===\n");
             let mut relation_index = 0usize;
-            for edge in &result.edges {
-                if !self.edge_is_visible(edge, options) {
-                    continue;
-                }
+            for edge in self.ordered_visible_edges(result, options) {
                 relation_index += 1;
                 self.render_edge(
                     &mut stdout,
@@ -324,12 +321,14 @@ impl HumanRenderer {
             }
         } else {
             let mut emitted = BTreeSet::new();
-            for edge in &result.edges {
-                if !self.edge_is_visible(edge, options) {
+            for edge in self.ordered_visible_edges(result, options) {
+                let Some(callee) = &edge.callee else {
+                    // 대상이 없는 unresolved 근거는 상세/JSON 출력에서만
+                    // 보여 준다. 연결 경로를 만들 수 없기 때문이다.
                     continue;
-                }
+                };
 
-                for symbol_id in std::iter::once(&edge.caller).chain(edge.callee.as_ref()) {
+                for symbol_id in [&edge.caller, callee] {
                     if emitted.insert(symbol_id.clone()) {
                         if let Some(symbol) = result.symbols.get(symbol_id) {
                             out.push_str(symbol.display_name());
@@ -349,6 +348,104 @@ impl HumanRenderer {
         }
 
         out
+    }
+
+    /// 호출 관계를 caller -> callee 방향으로 순회한다.
+    /// 같은 caller의 여러 호출은 소스 위치 순으로 진행한다.
+    fn ordered_visible_edges<'a>(
+        &self,
+        result: &'a QueryResult,
+        options: &RenderOptions,
+    ) -> Vec<&'a CallEdge> {
+        let mut adjacency: BTreeMap<SymbolId, Vec<&CallEdge>> = BTreeMap::new();
+        let mut callers = BTreeSet::new();
+        let mut callees = BTreeSet::new();
+
+        for edge in &result.edges {
+            if !self.edge_is_visible(edge, options) {
+                continue;
+            }
+            adjacency
+                .entry(edge.caller.clone())
+                .or_default()
+                .push(edge);
+            callers.insert(edge.caller.clone());
+            if let Some(callee) = &edge.callee {
+                callees.insert(callee.clone());
+            }
+        }
+
+        for next in adjacency.values_mut() {
+            next.sort_by(|left, right| {
+                left.callsite
+                    .cmp(&right.callsite)
+                    .then_with(|| left.callee.cmp(&right.callee))
+                    .then_with(|| left.kind.cmp(&right.kind))
+                    .then_with(|| left.confidence.cmp(&right.confidence))
+            });
+        }
+
+        let mut starts = callers
+            .difference(&callees)
+            .cloned()
+            .collect::<Vec<_>>();
+        starts.sort_by(|left, right| self.compact_symbol_cmp(result, left, right));
+
+        // 사이클이나 부분 그래프에도 결정론적으로 진입할 수 있도록
+        // 나머지 caller를 보조 시작점으로 뒤에 붙인다.
+        let mut remaining = callers.into_iter().collect::<Vec<_>>();
+        remaining.sort_by(|left, right| self.compact_symbol_cmp(result, left, right));
+        starts.extend(remaining);
+
+        let mut ordered = Vec::new();
+        let mut expanded = BTreeSet::new();
+        for start in starts {
+            if !expanded.insert(start.clone()) {
+                continue;
+            }
+
+            let mut stack = vec![(start, 0usize)];
+            while let Some((caller, edge_index)) = stack.pop() {
+                let Some(edges) = adjacency.get(&caller) else {
+                    continue;
+                };
+                let Some(edge) = edges.get(edge_index).copied() else {
+                    continue;
+                };
+
+                // 현재 caller의 나머지 호출을 나중에 이어가도록 두고,
+                // 이 호출의 callee 하위 그래프를 먼저 순회한다.
+                stack.push((caller, edge_index + 1));
+                ordered.push(edge);
+
+                if let Some(callee) = &edge.callee {
+                    if expanded.insert(callee.clone()) {
+                        stack.push((callee.clone(), 0));
+                    }
+                }
+            }
+        }
+
+        ordered
+    }
+
+    fn compact_symbol_cmp(
+        &self,
+        result: &QueryResult,
+        left: &SymbolId,
+        right: &SymbolId,
+    ) -> std::cmp::Ordering {
+        let left_name = result
+            .symbols
+            .get(left)
+            .map(Symbol::display_name)
+            .unwrap_or("");
+        let right_name = result
+            .symbols
+            .get(right)
+            .map(Symbol::display_name)
+            .unwrap_or("");
+        left_name.cmp(right_name).then_with(|| left.cmp(right))
     }
 
     fn edge_is_visible(&self, edge: &CallEdge, options: &RenderOptions) -> bool {

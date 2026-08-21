@@ -813,22 +813,32 @@ impl ClangProvider {
 
     /// 커서로부터 정규화된 한정 이름 추출
     unsafe fn extract_qualified_name(&self, cursor: CXCursor) -> String {
-        let mut segments = Vec::new();
-        let mut cur = cursor;
+        let name = get_cx_string(clang_getCursorSpelling(cursor));
+        let mut scopes = Vec::new();
+        let mut parent = clang_getCursorSemanticParent(cursor);
 
-        while clang_Cursor_isNull(cur) == 0 && cur.kind != CXCursor_TranslationUnit {
-            let spelling = get_cx_string(clang_getCursorSpelling(cur));
-            if !spelling.is_empty() {
-                segments.push(spelling);
+        // LinkageSpec/UnexposedDecl 등의 spelling은 플랫폼에 따라 소스 파일
+        // 경로가 될 수 있다. C++ 한정 이름에는 실제 언어 범위인
+        // namespace/class 부모만 포함한다.
+        while clang_Cursor_isNull(parent) == 0 && parent.kind != CXCursor_TranslationUnit {
+            if parent.kind == CXCursor_Namespace || is_class_scope_cursor_kind(parent.kind) {
+                let spelling = get_cx_string(clang_getCursorSpelling(parent));
+                if !spelling.is_empty() {
+                    scopes.push(spelling);
+                }
             }
-            cur = clang_getCursorSemanticParent(cur);
+            parent = clang_getCursorSemanticParent(parent);
         }
 
-        segments.reverse();
-        if segments.is_empty() {
+        scopes.reverse();
+        if !name.is_empty() {
+            scopes.push(name);
+        }
+
+        if scopes.is_empty() {
             "unnamed".to_string()
         } else {
-            segments.join("::")
+            scopes.join("::")
         }
     }
 

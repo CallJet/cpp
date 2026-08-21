@@ -22,8 +22,8 @@ fn main() {
             process::exit(1);
         }
     };
-    let progress = render_options.progress;
-    let detailed_progress = progress && render_options.verbosity >= 2;
+    let progress = render_options.progress || render_options.verbosity > 0;
+    let detailed_progress = render_options.verbosity >= 2;
 
     if progress {
         eprint!("{CALLJET_ASCII_ART}");
@@ -59,7 +59,7 @@ fn main() {
 
     let provider = ClangProvider::new();
     let mut engine = QueryEngine::new(&project, provider);
-    let progress_verbosity = if progress && render_options.verbosity >= 2 {
+    let progress_verbosity = if render_options.verbosity >= 2 {
         2
     } else if progress {
         1
