@@ -15,6 +15,10 @@ pub struct ResolutionBatch {
     pub symbols: Vec<Symbol>,
     /// 발생한 분석 이슈 목록
     pub issues: Vec<AnalysisIssue>,
+    /// TU 파싱에 성공하여 후보 커서를 실제 검사한 컨텍스트 수
+    pub checked_contexts: usize,
+    /// TU 파싱에 실패해 후보 존재 여부를 판정하지 못한 컨텍스트 수
+    pub failed_contexts: usize,
 }
 
 /// 검증 요청 배치 (Verification Batch)
