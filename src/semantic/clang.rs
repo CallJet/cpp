@@ -75,6 +75,8 @@ pub struct ClangProvider {
     index: CXIndex,
     tu_cache: BTreeMap<CompilationKey, TuCacheEntry>,
     symbol_cache: BTreeMap<(CandidateSymbolId, CompilationKey), Option<Symbol>>,
+    override_family_cache:
+        BTreeMap<(SymbolId, CompilationKey, Vec<CandidateSymbolId>, usize), Vec<Symbol>>,
     next_edge_id: u32,
     pub tu_parse_count: usize,
     pub tu_cache_hits: usize,
@@ -101,6 +103,7 @@ impl ClangProvider {
             index,
             tu_cache: BTreeMap::new(),
             symbol_cache: BTreeMap::new(),
+            override_family_cache: BTreeMap::new(),
             next_edge_id: 1,
             tu_parse_count: 0,
             tu_cache_hits: 0,
@@ -219,7 +222,6 @@ impl SemanticProvider for ClangProvider {
                 .iter()
                 .filter_map(|key| project.compilation_db.context_by_key(key))
                 .collect::<Vec<_>>();
-
             // 관련 컨텍스트를 찾지 못했다고 전체 compile_commands를 순회하지 않는다.
             // QueryEngine은 이 경우 Tree-sitter 후보를 임시 심볼로 보존한다.
             if contexts.is_empty() {
@@ -230,6 +232,7 @@ impl SemanticProvider for ClangProvider {
 
             for ctx in contexts {
                 if let Some(cached) = self.symbol_cache.get(&(cand_id, ctx.key.clone())) {
+                    result.checked_contexts += 1;
                     if let Some(sym) = cached {
                         resolved_symbol = Some(sym.clone());
                         break;
@@ -239,6 +242,7 @@ impl SemanticProvider for ClangProvider {
 
                 match self.get_or_parse_tu(ctx) {
                     Ok(tu) => {
+                        result.checked_contexts += 1;
                         if let Some(sym) = self.resolve_symbol_with_cand(tu, candidate) {
                             self.symbol_cache
                                 .insert((cand_id, ctx.key.clone()), Some(sym.clone()));
@@ -249,6 +253,7 @@ impl SemanticProvider for ClangProvider {
                         }
                     }
                     Err(err) => {
+                        result.failed_contexts += 1;
                         result.issues.push(AnalysisIssue {
                             severity: Severity::Recoverable,
                             context: Some(ctx.key.clone()),
@@ -308,13 +313,29 @@ impl SemanticProvider for ClangProvider {
             }
         };
 
+        let target_candidates = batch.symbols;
+
         // 3. 배치 내 각 후보 호출 검증. 최초 구축한 discovery 인덱스를 재사용한다.
         for call_id in batch.calls {
             if let Some(call_site) = discovery.calls.get(&call_id) {
                 if let Some((edge, caller, callee)) =
-                    self.verify_single_call(tu, call_site, &context, discovery)
+                    self.verify_single_call(
+                        project,
+                        tu,
+                        call_site,
+                        &context,
+                        discovery,
+                        &target_candidates,
+                    )
                 {
-                    for symbol in std::iter::once(caller).chain(callee) {
+                    let family_symbols = edge
+                        .evidence_by_context
+                        .values()
+                        .flat_map(|evidence| evidence.candidate_targets.iter().cloned());
+                    for symbol in std::iter::once(caller)
+                        .chain(callee)
+                        .chain(family_symbols)
+                    {
                         if !result.symbols.iter().any(|item| item.id == symbol.id) {
                             result.symbols.push(symbol);
                         }
@@ -329,12 +350,12 @@ impl SemanticProvider for ClangProvider {
 }
 
 impl ClangProvider {
-    /// TU 내에서 특정 후보 심볼을 Clang 커서로 찾아 canonical Symbol 생성
-    fn resolve_symbol_with_cand(
+    /// TU 내에서 특정 구문 후보와 이름/kind가 일치하는 canonical callable 커서를 찾는다.
+    fn cursor_with_cand(
         &self,
         tu: CXTranslationUnit,
         cand: &crate::model::CandidateSymbol,
-    ) -> Option<Symbol> {
+    ) -> Option<CXCursor> {
         let file_path = &cand.declaration.start.file;
         let c_file = CString::new(file_path.to_str()?).ok()?;
 
@@ -363,8 +384,27 @@ impl ClangProvider {
                 cursor
             };
 
-            self.cursor_to_symbol(cursor_to_use, cand.language)
+            if !is_callable_cursor_kind(cursor_to_use.kind) {
+                return None;
+            }
+
+            let spelling = get_cx_string(clang_getCursorSpelling(cursor_to_use));
+            if spelling != cand.name {
+                return None;
+            }
+
+            Some(cursor_to_use)
         }
+    }
+
+    /// TU 내에서 특정 후보 심볼을 Clang 커서로 찾아 canonical Symbol 생성
+    fn resolve_symbol_with_cand(
+        &self,
+        tu: CXTranslationUnit,
+        cand: &crate::model::CandidateSymbol,
+    ) -> Option<Symbol> {
+        let cursor = self.cursor_with_cand(tu, cand)?;
+        unsafe { self.cursor_to_symbol(cursor, cand.language) }
     }
 
     /// Clang 커서로부터 정규화된 Symbol 데이터 구조 생성
@@ -490,13 +530,140 @@ impl ClangProvider {
         (spelling == expected_name).then_some(callable)
     }
 
+    /// 정적 virtual 대상과 같은 override family에 속한 활성 메서드 심볼을 수집한다.
+    ///
+    /// libclang은 한 커서가 override하는 조상만 반환하므로, 이름 검색으로 좁혀진
+    /// 활성 후보를 관련 TU에서 해석하고 안정적인 SymbolId 조상 체인을 비교한다.
+    fn override_family_symbols(
+        &mut self,
+        project: &ProjectContext,
+        current_tu: CXTranslationUnit,
+        current_context: &CompilationContext,
+        reference: CXCursor,
+        static_target: &Symbol,
+        discovery: &crate::discovery::DiscoveryIndex,
+        expected_name: &str,
+        target_candidates: &[CandidateSymbolId],
+    ) -> Vec<Symbol> {
+        let mut target_key = target_candidates.to_vec();
+        target_key.sort();
+        target_key.dedup();
+        let cache_key = (
+            static_target.id.clone(),
+            current_context.key.clone(),
+            target_key.clone(),
+            discovery.symbols.len(),
+        );
+        if let Some(cached) = self.override_family_cache.get(&cache_key) {
+            return cached.clone();
+        }
+
+        let reference_chain =
+            unsafe { self.override_chain_symbols(reference, static_target.id.language) };
+        let reference_ids = reference_chain
+            .iter()
+            .map(|symbol| symbol.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut family = reference_chain
+            .into_iter()
+            .map(|symbol| (symbol.id.clone(), symbol))
+            .collect::<BTreeMap<_, _>>();
+
+        let candidates = if target_key.is_empty() {
+            discovery
+                .symbols
+                .values()
+                .filter(|candidate| candidate.name == expected_name)
+                .collect::<Vec<_>>()
+        } else {
+            target_key
+                .iter()
+                .filter_map(|id| discovery.symbols.get(id))
+                .filter(|candidate| candidate.name == expected_name)
+                .collect::<Vec<_>>()
+        };
+
+        for candidate in candidates {
+            let mut context_keys = vec![current_context.key.clone()];
+            for key in discovery.contexts_for_symbol(candidate.id, project) {
+                if !context_keys.contains(&key) {
+                    context_keys.push(key);
+                }
+            }
+
+            for key in context_keys {
+                let candidate_tu = if key == current_context.key {
+                    current_tu
+                } else {
+                    let Some(context) = project.compilation_db.context_by_key(&key) else {
+                        continue;
+                    };
+                    let Ok(tu) = self.get_or_parse_tu(context) else {
+                        continue;
+                    };
+                    tu
+                };
+
+                let Some(candidate_cursor) = self.cursor_with_cand(candidate_tu, candidate) else {
+                    continue;
+                };
+                if candidate_cursor.kind != CXCursor_CXXMethod {
+                    continue;
+                }
+
+                let candidate_symbol =
+                    unsafe { self.cursor_to_symbol(candidate_cursor, candidate.language) };
+                let Some(candidate_symbol) = candidate_symbol else {
+                    continue;
+                };
+                let candidate_chain = unsafe {
+                    self.override_chain_symbols(candidate_cursor, candidate.language)
+                };
+                let is_ancestor = reference_ids.contains(&candidate_symbol.id);
+                let is_descendant = candidate_chain
+                    .iter()
+                    .any(|symbol| symbol.id == static_target.id);
+                if is_ancestor || is_descendant {
+                    for symbol in candidate_chain {
+                        family.entry(symbol.id.clone()).or_insert(symbol);
+                    }
+                }
+            }
+        }
+
+        let symbols = family.into_values().collect::<Vec<_>>();
+        self.override_family_cache
+            .insert(cache_key, symbols.clone());
+        symbols
+    }
+
+    /// 한 메서드와 재귀적인 override 조상 커서를 안정적인 심볼로 변환한다.
+    unsafe fn override_chain_symbols(
+        &self,
+        cursor: CXCursor,
+        language: Language,
+    ) -> Vec<Symbol> {
+        let mut cursors = Vec::new();
+        collect_override_chain(cursor, &mut cursors);
+
+        let mut symbols = BTreeMap::new();
+        for cursor in cursors {
+            if let Some(symbol) = self.cursor_to_symbol(cursor, language) {
+                symbols.entry(symbol.id.clone()).or_insert(symbol);
+            }
+        }
+        symbols.into_values().collect()
+    }
+
     /// 단일 후보 호출에 대한 Clang 시맨틱 검증 수행
     fn verify_single_call(
         &mut self,
+        project: &ProjectContext,
         tu: CXTranslationUnit,
         call_site: &crate::model::CandidateCallSite,
         context: &CompilationContext,
         discovery: &crate::discovery::DiscoveryIndex,
+        target_candidates: &[CandidateSymbolId],
     ) -> Option<(CallEdge, Symbol, Option<Symbol>)> {
         let file_path = &call_site.expression.start.file;
         let c_file = CString::new(file_path.to_str()?).ok()?;
@@ -560,6 +727,27 @@ impl ClangProvider {
             };
 
             let callee_id = callee_sym.as_ref().map(|s| s.id.clone());
+            let mut candidate_targets = if is_virtual {
+                if let Some(static_target) = &callee_sym {
+                    self.override_family_symbols(
+                        project,
+                        tu,
+                        context,
+                        canonical_ref,
+                        static_target,
+                        discovery,
+                        &call_site.callee_spelling,
+                        target_candidates,
+                    )
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            if candidate_targets.is_empty() {
+                candidate_targets.extend(callee_sym.iter().cloned());
+            }
 
             let mut contexts_set = BTreeSet::new();
             contexts_set.insert(context.key.clone());
@@ -568,11 +756,7 @@ impl ClangProvider {
             let evidence = VerificationEvidence {
                 expression_text: call_site.expression_text.clone(),
                 static_target: callee_sym.clone(),
-                candidate_targets: if let Some(s) = &callee_sym {
-                    vec![s.clone()]
-                } else {
-                    Vec::new()
-                },
+                candidate_targets,
                 clang_diagnostics: Vec::new(),
                 reason,
                 spelling_location: call_site
@@ -656,14 +840,10 @@ impl ClangProvider {
         while clang_Cursor_isNull(parent) == 0 && parent.kind != CXCursor_TranslationUnit {
             let spelling = get_cx_string(clang_getCursorSpelling(parent));
             if !spelling.is_empty() {
-                match parent.kind {
-                    CXCursor_Namespace => namespaces.push(spelling),
-                    CXCursor_ClassDecl
-                    | CXCursor_StructDecl
-                    | CXCursor_UnionDecl
-                    | CXCursor_ClassTemplate
-                    | CXCursor_ClassTemplatePartialSpecialization => classes.push(spelling),
-                    _ => {}
+                if parent.kind == CXCursor_Namespace {
+                    namespaces.push(spelling);
+                } else if is_class_scope_cursor_kind(parent.kind) {
+                    classes.push(spelling);
                 }
             }
             parent = clang_getCursorSemanticParent(parent);
@@ -720,15 +900,71 @@ fn callee_spelling_point(
 }
 
 fn is_callable_cursor_kind(kind: CXCursorKind) -> bool {
-    matches!(
-        kind,
-        CXCursor_FunctionDecl
-            | CXCursor_CXXMethod
-            | CXCursor_Constructor
-            | CXCursor_Destructor
-            | CXCursor_ConversionFunction
-            | CXCursor_FunctionTemplate
-    )
+    [
+        CXCursor_FunctionDecl,
+        CXCursor_CXXMethod,
+        CXCursor_Constructor,
+        CXCursor_Destructor,
+        CXCursor_ConversionFunction,
+        CXCursor_FunctionTemplate,
+    ]
+    .contains(&kind)
+}
+
+fn is_class_scope_cursor_kind(kind: CXCursorKind) -> bool {
+    [
+        CXCursor_ClassDecl,
+        CXCursor_StructDecl,
+        CXCursor_UnionDecl,
+        CXCursor_ClassTemplate,
+        CXCursor_ClassTemplatePartialSpecialization,
+    ]
+    .contains(&kind)
+}
+
+/// 커서 자신과 재귀적인 override 조상을 canonical cursor로 수집한다.
+unsafe fn collect_override_chain(cursor: CXCursor, cursors: &mut Vec<CXCursor>) {
+    let canonical = canonical_cursor_or_self(cursor);
+    if contains_cursor(cursors, canonical) {
+        return;
+    }
+    cursors.push(canonical);
+
+    if canonical.kind != CXCursor_CXXMethod {
+        return;
+    }
+
+    let mut overridden: *mut CXCursor = std::ptr::null_mut();
+    let mut count: std::os::raw::c_uint = 0;
+    clang_getOverriddenCursors(canonical, &mut overridden, &mut count);
+
+    let direct_ancestors = if overridden.is_null() || count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(overridden, count as usize).to_vec()
+    };
+    if !overridden.is_null() {
+        clang_disposeOverriddenCursors(overridden);
+    }
+
+    for ancestor in direct_ancestors {
+        collect_override_chain(ancestor, cursors);
+    }
+}
+
+unsafe fn canonical_cursor_or_self(cursor: CXCursor) -> CXCursor {
+    let canonical = clang_getCanonicalCursor(cursor);
+    if clang_Cursor_isNull(canonical) == 0 {
+        canonical
+    } else {
+        cursor
+    }
+}
+
+unsafe fn contains_cursor(cursors: &[CXCursor], candidate: CXCursor) -> bool {
+    cursors
+        .iter()
+        .any(|cursor| clang_equalCursors(*cursor, candidate) != 0)
 }
 
 /// CXString 문자열 변환 및 자동 메모리 해제 헬퍼

@@ -7,9 +7,9 @@ use std::time::Instant;
 use crate::diagnostic::{FatalError, QueryError};
 use crate::discovery::DiscoveryIndex;
 use crate::model::{
-    CallEdge, CallEdgeId, CallPath, CandidateCallId, CandidateSymbol, CandidateSymbolKind,
-    CompilationKey, Completion, Confidence, QueryMetrics, QueryRequest, QueryResult, ResultCounts,
-    Symbol, SymbolId, SymbolQuery, VerifiedEdgeKey,
+    CallEdge, CallEdgeId, CallKind, CallPath, CandidateCallId, CandidateSymbol,
+    CandidateSymbolKind, CompilationKey, Completion, Confidence, QueryMetrics, QueryRequest,
+    QueryResult, ResultCounts, Symbol, SymbolId, SymbolQuery, VerifiedEdgeKey,
 };
 use crate::project::ProjectContext;
 use crate::semantic::{SemanticProvider, VerificationBatch};
@@ -149,7 +149,23 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 .resolve_symbols(self.project, &self.discovery, &cand_ids);
 
         if resolution.symbols.is_empty() {
+            if resolution.failed_contexts > 0 {
+                return Err(FatalError::AnalysisFailed(format!(
+                    "심볼 '{}' 검증 중 {}개 컴파일 컨텍스트를 파싱하지 못했습니다.",
+                    query.raw, resolution.failed_contexts
+                )));
+            }
+
+            // 관련 TU를 정상 파싱했지만 callable 커서가 하나도 없으면 해당
+            // 빌드 구성에서 #if 등으로 비활성화된 구문 후보로 간주한다.
+            if resolution.checked_contexts > 0 {
+                return Err(FatalError::Query(QueryError::SymbolNotFound {
+                    query: query.raw.clone(),
+                }));
+            }
+
             // Clang에서 해석하지 못한 경우, 힌트 기반으로 임시 fallback 심볼 생성
+            // (연결 가능한 컴파일 컨텍스트 자체가 없을 때만 허용)
             let first_cand = self.discovery.symbols.get(&cand_ids[0]).unwrap();
             let (namespace, class_name) = candidate_scope_parts(first_cand);
             let sym = Symbol {
@@ -249,6 +265,13 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             // 1. 후보 호출 발견 (역방향)
             self.discovery
                 .discover_spelling(self.project, &cur_sym.name);
+            let cur_query = SymbolQuery::parse(
+                cur_sym
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(cur_sym.name.as_str()),
+            );
+            let target_candidates = self.discovery.matching_symbols(&cur_query).to_vec();
             let candidate_calls = self.discovery.candidate_callers(&cur_sym);
             metrics.semantic_candidates_verified += candidate_calls.len();
 
@@ -274,7 +297,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
                     context: ctx_key,
-                    symbols: Vec::new(),
+                    symbols: target_candidates.clone(),
                     calls,
                 };
                 let ver_res =
@@ -283,19 +306,26 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
-                for edge in ver_res.edges {
+                for mut edge in ver_res.edges {
                     // verified_only 필터링
                     if verified_only && edge.confidence != Confidence::Confirmed {
                         continue;
                     }
 
                     // 피호출자가 현재 심볼과 매칭되는지 확인
-                    let matches_callee = match &edge.callee {
-                        Some(callee_id) => callee_id == &item.symbol,
-                        None => edge.confidence == Confidence::Unresolved,
-                    };
+                    let matches_callee = edge_targets_symbol(&edge, &item.symbol)
+                        || (edge.callee.is_none()
+                            && edge.confidence == Confidence::Unresolved);
 
                     if matches_callee {
+                        // 정적 참조가 base virtual 메서드여도 요청 대상이 같은 override
+                        // family라면 쿼리 결과 엣지는 실제 요청 대상으로 연결한다.
+                        if edge.kind == CallKind::Virtual
+                            && edge.callee.as_ref() != Some(&item.symbol)
+                        {
+                            edge.callee = Some(item.symbol.clone());
+                        }
+
                         // caller 심볼 기록
                         let caller_id = edge.caller.clone();
                         let edge_key = VerifiedEdgeKey {
@@ -577,6 +607,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         );
         let source_sym = self.resolve_endpoint(&source_query)?;
         let target_sym = self.resolve_endpoint(&target_query)?;
+        let target_candidates = self.discovery.matching_symbols(&target_query).to_vec();
         eprintln!(
             "[CallJet] traversal/path: forward search {} -> {}",
             source_sym.display_name(),
@@ -686,7 +717,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
                     context: ctx_key,
-                    symbols: Vec::new(),
+                    symbols: target_candidates.clone(),
                     calls,
                 };
                 let ver_res =
@@ -695,9 +726,16 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
                 record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
-                for edge in ver_res.edges {
+                for mut edge in ver_res.edges {
                     if verified_only && edge.confidence != Confidence::Confirmed {
                         continue;
+                    }
+
+                    if edge.kind == CallKind::Virtual
+                        && edge_targets_symbol(&edge, &target_sym.id)
+                        && edge.callee.as_ref() != Some(&target_sym.id)
+                    {
+                        edge.callee = Some(target_sym.id.clone());
                     }
 
                     let edge_id = edge.id;
@@ -823,6 +861,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
     ) -> Result<QueryResult, FatalError> {
         let caller_sym = self.resolve_endpoint(&caller_query)?;
         let callee_sym = self.resolve_endpoint(&callee_query)?;
+        let target_candidates = self.discovery.matching_symbols(&callee_query).to_vec();
 
         let mut symbols_map: BTreeMap<SymbolId, Symbol> = BTreeMap::new();
         symbols_map.insert(caller_sym.id.clone(), caller_sym.clone());
@@ -856,15 +895,20 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         for (ctx_key, calls) in batches {
             let batch = VerificationBatch {
                 context: ctx_key,
-                symbols: Vec::new(),
+                symbols: target_candidates.clone(),
                 calls,
             };
             let ver_res =
                 self.provider
                     .verify_calls(self.project, &self.discovery, batch);
             record_verified_symbols(&mut symbols_map, ver_res.symbols);
-            for edge in ver_res.edges {
-                if edge.callee.as_ref() == Some(&callee_sym.id) {
+            for mut edge in ver_res.edges {
+                if edge_targets_symbol(&edge, &callee_sym.id) {
+                    if edge.kind == CallKind::Virtual
+                        && edge.callee.as_ref() != Some(&callee_sym.id)
+                    {
+                        edge.callee = Some(callee_sym.id.clone());
+                    }
                     record_symbols_from_edge(&mut symbols_map, &edge);
                     verified_edges.push(edge);
                 }
@@ -1029,6 +1073,20 @@ fn record_symbols_from_edge(symbols_map: &mut BTreeMap<SymbolId, Symbol>, edge: 
                 .or_insert_with(|| cand.clone());
         }
     }
+}
+
+/// 정적 대상 또는 virtual override 후보 집합에 요청 심볼이 포함되는지 확인한다.
+fn edge_targets_symbol(edge: &CallEdge, target: &SymbolId) -> bool {
+    if edge.callee.as_ref() == Some(target) {
+        return true;
+    }
+
+    edge.evidence_by_context.values().any(|evidence| {
+        evidence
+            .candidate_targets
+            .iter()
+            .any(|candidate| &candidate.id == target)
+    })
 }
 
 /// 결과 요약 통계 계산
