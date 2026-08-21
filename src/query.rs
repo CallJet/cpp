@@ -460,10 +460,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         target_query: SymbolQuery,
         max_depth: Option<usize>,
         verified_only: bool,
-        include_paths: bool,
+        trace_mode: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
-        let query_name = if include_paths { "trace" } else { "callers" };
+        let query_name = if trace_mode { "trace" } else { "callers" };
         progress_log!(
             self.progress,
             "[CallJet] query/{query_name}: resolving target '{}'...",
@@ -589,7 +589,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                     // 아니므로 trace에 포함하거나 역방향 프론티어를 늘리면
                     // 관계없는 caller까지 연쇄적으로 확장된다.
                     let matches_callee =
-                        targets_current || (!include_paths && unresolved_candidate);
+                        targets_current || (!trace_mode && unresolved_candidate);
 
                     if matches_callee {
                         // 정적 참조가 base virtual 메서드여도 요청 대상이 같은 override
@@ -686,11 +686,11 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         metrics.verified_translation_units = verified_tu_keys.len();
 
         let edges_vec: Vec<CallEdge> = state.edges.into_values().collect();
-        let paths = if include_paths {
-            build_caller_paths(&target_sym.id, &edges_vec)
-        } else {
-            Vec::new()
-        };
+        // callers와 trace 모두 실제 역방향 순회로 만든
+        // caller -> callee 경로를 결과에 싣는다. callers에서 경로를
+        // 비워 두면 렌더러가 정렬된 edge 집합으로 순서를 다시
+        // 추측하게 되고, 이때 함수명 사전식 순서가 노출된다.
+        let paths = build_caller_paths(&target_sym.id, &edges_vec);
         let counts = calculate_counts(&symbols_map, &edges_vec, &paths);
 
         let completion = if edges_vec.is_empty() {
@@ -1505,6 +1505,7 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
     let mut adjacency: BTreeMap<SymbolId, Vec<(SymbolId, CallEdgeId)>> = BTreeMap::new();
     let mut callers = BTreeSet::new();
     let mut callees = BTreeSet::new();
+    let mut first_callsites = BTreeMap::new();
 
     let mut ordered_edges = edges.iter().collect::<Vec<_>>();
     ordered_edges.sort_by(|left, right| {
@@ -1524,6 +1525,9 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
             .entry(edge.caller.clone())
             .or_default()
             .push((callee.clone(), edge.id));
+        first_callsites
+            .entry(edge.caller.clone())
+            .or_insert_with(|| edge.callsite.clone());
         callers.insert(edge.caller.clone());
         callees.insert(callee.clone());
     }
@@ -1537,12 +1541,28 @@ fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
         .difference(&callees)
         .cloned()
         .collect::<Vec<_>>();
+    roots.sort_by(|left, right| {
+        first_callsites
+            .get(left)
+            .cmp(&first_callsites.get(right))
+            .then_with(|| left.cmp(right))
+    });
 
     // 순환 그래프에는 진입 차수가 0인 루트가 없을 수 있다. 이때는 대상이 아닌
-    // 첫 발견 심볼 하나를 시작점으로 사용해 최소한의 순환 경로를 보여준다.
+    // 첫 callsite 심볼 하나를 시작점으로 사용해 최소한의 순환 경로를 보여준다.
     if roots.is_empty() {
-        if let Some(fallback) = callers.iter().find(|symbol| *symbol != target) {
-            roots.push(fallback.clone());
+        let mut fallback_callers = callers
+            .into_iter()
+            .filter(|symbol| symbol != target)
+            .collect::<Vec<_>>();
+        fallback_callers.sort_by(|left, right| {
+            first_callsites
+                .get(left)
+                .cmp(&first_callsites.get(right))
+                .then_with(|| left.cmp(right))
+        });
+        if let Some(fallback) = fallback_callers.into_iter().next() {
+            roots.push(fallback);
         }
     }
 

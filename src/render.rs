@@ -389,12 +389,18 @@ impl HumanRenderer {
             .difference(&callees)
             .cloned()
             .collect::<Vec<_>>();
-        starts.sort_by(|left, right| self.compact_symbol_cmp(result, left, right));
+        starts.sort_by(|left, right| {
+            self.first_callsite_cmp(&adjacency, left, right)
+                .then_with(|| left.cmp(right))
+        });
 
         // 사이클이나 부분 그래프에도 결정론적으로 진입할 수 있도록
         // 나머지 caller를 보조 시작점으로 뒤에 붙인다.
         let mut remaining = callers.into_iter().collect::<Vec<_>>();
-        remaining.sort_by(|left, right| self.compact_symbol_cmp(result, left, right));
+        remaining.sort_by(|left, right| {
+            self.first_callsite_cmp(&adjacency, left, right)
+                .then_with(|| left.cmp(right))
+        });
         starts.extend(remaining);
 
         let mut ordered = Vec::new();
@@ -429,23 +435,21 @@ impl HumanRenderer {
         ordered
     }
 
-    fn compact_symbol_cmp(
+    fn first_callsite_cmp(
         &self,
-        result: &QueryResult,
+        adjacency: &BTreeMap<SymbolId, Vec<&CallEdge>>,
         left: &SymbolId,
         right: &SymbolId,
     ) -> std::cmp::Ordering {
-        let left_name = result
-            .symbols
+        let left_callsite = adjacency
             .get(left)
-            .map(Symbol::display_name)
-            .unwrap_or("");
-        let right_name = result
-            .symbols
+            .and_then(|edges| edges.first())
+            .map(|edge| &edge.callsite);
+        let right_callsite = adjacency
             .get(right)
-            .map(Symbol::display_name)
-            .unwrap_or("");
-        left_name.cmp(right_name).then_with(|| left.cmp(right))
+            .and_then(|edges| edges.first())
+            .map(|edge| &edge.callsite);
+        left_callsite.cmp(&right_callsite)
     }
 
     fn edge_is_visible(&self, edge: &CallEdge, options: &RenderOptions) -> bool {

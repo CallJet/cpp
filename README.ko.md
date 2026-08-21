@@ -66,6 +66,7 @@ calljet trace "Controller::dispatch" --root . --compile-commands build/compile_c
 
 ### 2. `callers` — 역방향 호출자 탐색
 특정 함수/심볼을 호출하는 모든 상위 함수 체인을 온디맨드로 역추적합니다.
+기본 텍스트 출력은 최상위 caller에서 요청한 callee까지의 경로 순서를 그대로 사용합니다.
 
 ```bash
 calljet callers <TARGET_SYMBOL> [OPTIONS]
