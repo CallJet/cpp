@@ -41,10 +41,9 @@ pub struct QueryEngine<'a, S: SemanticProvider> {
 impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
     /// 새 쿼리 엔진 인스턴스 생성
     pub fn new(project: &'a ProjectContext, provider: S) -> Self {
-        let discovery = DiscoveryIndex::build(project);
         Self {
             project,
-            discovery,
+            discovery: DiscoveryIndex::default(),
             provider,
         }
     }
@@ -52,21 +51,26 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
     /// 쿼리 요청 실행
     pub fn execute(&mut self, request: QueryRequest) -> Result<QueryResult, FatalError> {
         let total_start = Instant::now();
+        let inspected_before = self.discovery.source_files_inspected;
+        let parsed_before = self.discovery.source_files.len();
+        let discovery_time_before = self.discovery.discovery_time;
 
         let mut metrics = QueryMetrics {
-            source_files_inspected: self.project.source_files().len(),
-            source_files_parsed_by_treesitter: self.project.source_files().len(),
-            candidate_call_sites: self.discovery.calls.len(),
             available_translation_units: self.project.compilation_db.all_source_files().len(),
             ..Default::default()
         };
 
         let result = match request {
+            QueryRequest::Trace {
+                target,
+                max_depth,
+                verified_only,
+            } => self.execute_callers(target, max_depth, verified_only, true, &mut metrics)?,
             QueryRequest::Callers {
                 target,
                 max_depth,
                 verified_only,
-            } => self.execute_callers(target, max_depth, verified_only, &mut metrics)?,
+            } => self.execute_callers(target, max_depth, verified_only, false, &mut metrics)?,
             QueryRequest::Callees {
                 source,
                 max_depth,
@@ -83,10 +87,24 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             }
         };
 
+        metrics.source_files_inspected = self
+            .discovery
+            .source_files_inspected
+            .saturating_sub(inspected_before);
+        metrics.source_files_parsed_by_treesitter = self
+            .discovery
+            .source_files
+            .len()
+            .saturating_sub(parsed_before);
+        metrics.candidate_call_sites = self.discovery.calls.len();
+        metrics.discovery_time = self
+            .discovery
+            .discovery_time
+            .saturating_sub(discovery_time_before);
         metrics.total_query_time = total_start.elapsed();
 
         // 검증된 파일 및 스킵된 파일 목록 계산
-        let all_sources = self.project.source_files();
+        let all_sources = &self.discovery.source_files;
         let mut verified_files = BTreeSet::new();
         for edge in &result.edges {
             verified_files.insert(edge.callsite.start.file.clone());
@@ -101,7 +119,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         }
 
         let mut skipped_files = Vec::new();
-        for src in &all_sources {
+        for src in all_sources {
             if !verified_files.contains(src) {
                 skipped_files.push(src.clone());
             }
@@ -118,14 +136,17 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
 
     /// 단일 심볼 쿼리를 canonical Symbol로 해석
     fn resolve_endpoint(&mut self, query: &SymbolQuery) -> Result<Symbol, FatalError> {
-        let cand_ids = self.discovery.matching_symbols(query);
+        self.discovery.discover_query(self.project, query);
+        let cand_ids = self.discovery.matching_symbols(query).to_vec();
         if cand_ids.is_empty() {
             return Err(FatalError::Query(QueryError::SymbolNotFound {
                 query: query.raw.clone(),
             }));
         }
 
-        let resolution = self.provider.resolve_symbols(self.project, cand_ids);
+        let resolution =
+            self.provider
+                .resolve_symbols(self.project, &self.discovery, &cand_ids);
 
         if resolution.symbols.is_empty() {
             // Clang에서 해석하지 못한 경우, 힌트 기반으로 임시 fallback 심볼 생성
@@ -165,9 +186,19 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         target_query: SymbolQuery,
         max_depth: Option<usize>,
         verified_only: bool,
+        include_paths: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
+        let query_name = if include_paths { "trace" } else { "callers" };
+        eprintln!(
+            "[CallJet] query/{query_name}: resolving target '{}'...",
+            target_query.raw
+        );
         let target_sym = self.resolve_endpoint(&target_query)?;
+        eprintln!(
+            "[CallJet] traversal/{query_name}: reverse search from {}",
+            target_sym.display_name()
+        );
 
         let mut symbols_map: BTreeMap<SymbolId, Symbol> = BTreeMap::new();
         symbols_map.insert(target_sym.id.clone(), target_sym.clone());
@@ -183,8 +214,23 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(target_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut reported_depth = None;
+        let mut processed_nodes = 0usize;
+        let mut verified_batches = 0usize;
 
         while let Some(item) = state.frontier.pop_front() {
+            processed_nodes += 1;
+            if reported_depth != Some(item.depth) {
+                reported_depth = Some(item.depth);
+                eprintln!(
+                    "[CallJet] traversal/{query_name}: depth {}, processed {}, queued {}, verified edges {}",
+                    item.depth,
+                    processed_nodes,
+                    state.frontier.len(),
+                    state.edges.len()
+                );
+            }
+
             if let Some(limit) = max_depth {
                 if item.depth >= limit {
                     truncated = true;
@@ -198,6 +244,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             };
 
             // 1. 후보 호출 발견 (역방향)
+            self.discovery
+                .discover_spelling(self.project, &cur_sym.name);
             let candidate_calls = self.discovery.candidate_callers(&cur_sym);
             metrics.semantic_candidates_verified += candidate_calls.len();
 
@@ -205,36 +253,32 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
             for &call_id in &candidate_calls {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
-                if contexts.is_empty() {
-                    // 컨텍스트가 없으면 기본 첫 번째 컨텍스트 시도
-                    if let Some(first_file) = self.project.compilation_db.all_source_files().first()
-                    {
-                        if let Some(ctx) = self
-                            .project
-                            .compilation_db
-                            .contexts_for_source(first_file)
-                            .first()
-                        {
-                            batches.entry(ctx.key.clone()).or_default().push(call_id);
-                        }
-                    }
-                } else {
-                    for ctx_key in contexts {
-                        batches.entry(ctx_key).or_default().push(call_id);
-                    }
+                for ctx_key in contexts {
+                    batches.entry(ctx_key).or_default().push(call_id);
                 }
             }
 
             // 3. Clang 온디맨드 시맨틱 검증 수행
             let verify_start = Instant::now();
             for (ctx_key, calls) in batches {
+                verified_batches += 1;
+                if verified_batches == 1 || verified_batches % 25 == 0 {
+                    eprintln!(
+                        "[CallJet] traversal/{query_name}: verifying TU batch {verified_batches} ({} call candidate(s))",
+                        calls.len()
+                    );
+                }
                 verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
                     context: ctx_key,
                     symbols: Vec::new(),
                     calls,
                 };
-                let ver_res = self.provider.verify_calls(self.project, batch);
+                let ver_res =
+                    self.provider
+                        .verify_calls(self.project, &self.discovery, batch);
+
+                record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
                 for edge in ver_res.edges {
                     // verified_only 필터링
@@ -293,7 +337,12 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         metrics.verified_translation_units = verified_tu_keys.len();
 
         let edges_vec: Vec<CallEdge> = state.edges.into_values().collect();
-        let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
+        let paths = if include_paths {
+            build_caller_paths(&target_sym.id, &edges_vec)
+        } else {
+            Vec::new()
+        };
+        let counts = calculate_counts(&symbols_map, &edges_vec, &paths);
 
         let completion = if edges_vec.is_empty() {
             Completion::NoResult
@@ -305,11 +354,17 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             Completion::Complete
         };
 
+        eprintln!(
+            "[CallJet] traversal/{query_name}: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s), {} path(s)",
+            edges_vec.len(),
+            paths.len()
+        );
+
         Ok(QueryResult {
             completion,
             symbols: symbols_map,
             edges: edges_vec,
-            paths: Vec::new(),
+            paths,
             counts,
             diagnostics: Vec::new(),
             metrics: metrics.clone(),
@@ -324,7 +379,15 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         verified_only: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
+        eprintln!(
+            "[CallJet] query/callees: resolving source '{}'...",
+            source_query.raw
+        );
         let source_sym = self.resolve_endpoint(&source_query)?;
+        eprintln!(
+            "[CallJet] traversal/callees: forward search from {}",
+            source_sym.display_name()
+        );
 
         let mut symbols_map: BTreeMap<SymbolId, Symbol> = BTreeMap::new();
         symbols_map.insert(source_sym.id.clone(), source_sym.clone());
@@ -340,8 +403,23 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(source_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut reported_depth = None;
+        let mut processed_nodes = 0usize;
+        let mut verified_batches = 0usize;
 
         while let Some(item) = state.frontier.pop_front() {
+            processed_nodes += 1;
+            if reported_depth != Some(item.depth) {
+                reported_depth = Some(item.depth);
+                eprintln!(
+                    "[CallJet] traversal/callees: depth {}, processed {}, queued {}, verified edges {}",
+                    item.depth,
+                    processed_nodes,
+                    state.frontier.len(),
+                    state.edges.len()
+                );
+            }
+
             if let Some(limit) = max_depth {
                 if item.depth >= limit {
                     truncated = true;
@@ -350,9 +428,20 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             }
 
             // 1. 현재 심볼에 해당하는 candidate symbol 탐색
+            let cur_sym = match symbols_map.get(&item.symbol) {
+                Some(symbol) => symbol.clone(),
+                None => continue,
+            };
+            let cur_query = SymbolQuery::parse(
+                cur_sym
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(cur_sym.name.as_str()),
+            );
+            self.discovery.discover_query(self.project, &cur_query);
             let cand_syms = self
                 .discovery
-                .matching_symbols(&SymbolQuery::parse(&source_sym.name));
+                .matching_symbols(&cur_query);
             let mut calls_to_verify = Vec::new();
             for &cand_id in cand_syms {
                 let calls = self.discovery.candidate_callees(cand_id);
@@ -365,35 +454,32 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
             for &call_id in &calls_to_verify {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
-                if contexts.is_empty() {
-                    if let Some(first_file) = self.project.compilation_db.all_source_files().first()
-                    {
-                        if let Some(ctx) = self
-                            .project
-                            .compilation_db
-                            .contexts_for_source(first_file)
-                            .first()
-                        {
-                            batches.entry(ctx.key.clone()).or_default().push(call_id);
-                        }
-                    }
-                } else {
-                    for ctx_key in contexts {
-                        batches.entry(ctx_key).or_default().push(call_id);
-                    }
+                for ctx_key in contexts {
+                    batches.entry(ctx_key).or_default().push(call_id);
                 }
             }
 
             // 3. Clang 검증
             let verify_start = Instant::now();
             for (ctx_key, calls) in batches {
+                verified_batches += 1;
+                if verified_batches == 1 || verified_batches % 25 == 0 {
+                    eprintln!(
+                        "[CallJet] traversal/callees: verifying TU batch {verified_batches} ({} call candidate(s))",
+                        calls.len()
+                    );
+                }
                 verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
                     context: ctx_key,
                     symbols: Vec::new(),
                     calls,
                 };
-                let ver_res = self.provider.verify_calls(self.project, batch);
+                let ver_res =
+                    self.provider
+                        .verify_calls(self.project, &self.discovery, batch);
+
+                record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
                 for edge in ver_res.edges {
                     if verified_only && edge.confidence != Confidence::Confirmed {
@@ -457,6 +543,11 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             Completion::Complete
         };
 
+        eprintln!(
+            "[CallJet] traversal/callees: complete — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+            edges_vec.len()
+        );
+
         Ok(QueryResult {
             completion,
             symbols: symbols_map,
@@ -477,8 +568,17 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         verified_only: bool,
         metrics: &mut QueryMetrics,
     ) -> Result<QueryResult, FatalError> {
+        eprintln!(
+            "[CallJet] query/path: resolving '{}' -> '{}'...",
+            source_query.raw, target_query.raw
+        );
         let source_sym = self.resolve_endpoint(&source_query)?;
         let target_sym = self.resolve_endpoint(&target_query)?;
+        eprintln!(
+            "[CallJet] traversal/path: forward search {} -> {}",
+            source_sym.display_name(),
+            target_sym.display_name()
+        );
 
         let mut symbols_map: BTreeMap<SymbolId, Symbol> = BTreeMap::new();
         symbols_map.insert(source_sym.id.clone(), source_sym.clone());
@@ -491,6 +591,7 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 edges: vec![],
             };
             let counts = calculate_counts(&symbols_map, &[], std::slice::from_ref(&path));
+            eprintln!("[CallJet] traversal/path: source and target are identical");
             return Ok(QueryResult {
                 completion: Completion::Complete,
                 symbols: symbols_map,
@@ -514,8 +615,23 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         state.best_depth.insert(source_sym.id.clone(), 0);
 
         let mut verified_tu_keys = BTreeSet::new();
+        let mut reported_depth = None;
+        let mut processed_nodes = 0usize;
+        let mut verified_batches = 0usize;
 
         while let Some(item) = state.frontier.pop_front() {
+            processed_nodes += 1;
+            if reported_depth != Some(item.depth) {
+                reported_depth = Some(item.depth);
+                eprintln!(
+                    "[CallJet] traversal/path: depth {}, processed {}, queued {}, verified edges {}",
+                    item.depth,
+                    processed_nodes,
+                    state.frontier.len(),
+                    state.edges.len()
+                );
+            }
+
             if item.symbol == target_sym.id {
                 found_target = true;
                 break;
@@ -528,9 +644,20 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 }
             }
 
+            let cur_sym = match symbols_map.get(&item.symbol) {
+                Some(symbol) => symbol.clone(),
+                None => continue,
+            };
+            let cur_query = SymbolQuery::parse(
+                cur_sym
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(cur_sym.name.as_str()),
+            );
+            self.discovery.discover_query(self.project, &cur_query);
             let cand_syms = self
                 .discovery
-                .matching_symbols(&SymbolQuery::parse(&source_sym.name));
+                .matching_symbols(&cur_query);
             let mut calls_to_verify = Vec::new();
             for &cand_id in cand_syms {
                 let calls = self.discovery.candidate_callees(cand_id);
@@ -540,33 +667,30 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
             for &call_id in &calls_to_verify {
                 let contexts = self.discovery.contexts_for(call_id, self.project);
-                if contexts.is_empty() {
-                    if let Some(first_file) = self.project.compilation_db.all_source_files().first()
-                    {
-                        if let Some(ctx) = self
-                            .project
-                            .compilation_db
-                            .contexts_for_source(first_file)
-                            .first()
-                        {
-                            batches.entry(ctx.key.clone()).or_default().push(call_id);
-                        }
-                    }
-                } else {
-                    for ctx_key in contexts {
-                        batches.entry(ctx_key).or_default().push(call_id);
-                    }
+                for ctx_key in contexts {
+                    batches.entry(ctx_key).or_default().push(call_id);
                 }
             }
 
             for (ctx_key, calls) in batches {
+                verified_batches += 1;
+                if verified_batches == 1 || verified_batches % 25 == 0 {
+                    eprintln!(
+                        "[CallJet] traversal/path: verifying TU batch {verified_batches} ({} call candidate(s))",
+                        calls.len()
+                    );
+                }
                 verified_tu_keys.insert(ctx_key.clone());
                 let batch = VerificationBatch {
                     context: ctx_key,
                     symbols: Vec::new(),
                     calls,
                 };
-                let ver_res = self.provider.verify_calls(self.project, batch);
+                let ver_res =
+                    self.provider
+                        .verify_calls(self.project, &self.discovery, batch);
+
+                record_verified_symbols(&mut symbols_map, ver_res.symbols);
 
                 for edge in ver_res.edges {
                     if verified_only && edge.confidence != Confidence::Confirmed {
@@ -638,6 +762,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 edges: path_edges,
             };
             let counts = calculate_counts(&symbols_map, &edges_vec, std::slice::from_ref(&path));
+            eprintln!(
+                "[CallJet] traversal/path: found — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} hop(s)",
+                path.edges.len()
+            );
 
             Ok(QueryResult {
                 completion: Completion::Complete,
@@ -650,6 +778,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             })
         } else if truncated {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
+            eprintln!(
+                "[CallJet] traversal/path: truncated — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+                edges_vec.len()
+            );
             Ok(QueryResult {
                 completion: Completion::Truncated {
                     max_depth: max_depth.unwrap_or(0),
@@ -663,6 +795,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             })
         } else {
             let counts = calculate_counts(&symbols_map, &edges_vec, &[]);
+            eprintln!(
+                "[CallJet] traversal/path: no path — processed {processed_nodes} node(s), {verified_batches} TU batch(es), {} edge(s)",
+                edges_vec.len()
+            );
             Ok(QueryResult {
                 completion: Completion::NoResult,
                 symbols: symbols_map,
@@ -709,21 +845,8 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
         let mut batches: BTreeMap<CompilationKey, Vec<CandidateCallId>> = BTreeMap::new();
         for &call_id in &calls_to_verify {
             let contexts = self.discovery.contexts_for(call_id, self.project);
-            if contexts.is_empty() {
-                if let Some(first_file) = self.project.compilation_db.all_source_files().first() {
-                    if let Some(ctx) = self
-                        .project
-                        .compilation_db
-                        .contexts_for_source(first_file)
-                        .first()
-                    {
-                        batches.entry(ctx.key.clone()).or_default().push(call_id);
-                    }
-                }
-            } else {
-                for ctx_key in contexts {
-                    batches.entry(ctx_key).or_default().push(call_id);
-                }
+            for ctx_key in contexts {
+                batches.entry(ctx_key).or_default().push(call_id);
             }
         }
 
@@ -733,7 +856,10 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
                 symbols: Vec::new(),
                 calls,
             };
-            let ver_res = self.provider.verify_calls(self.project, batch);
+            let ver_res =
+                self.provider
+                    .verify_calls(self.project, &self.discovery, batch);
+            record_verified_symbols(&mut symbols_map, ver_res.symbols);
             for edge in ver_res.edges {
                 if edge.callee.as_ref() == Some(&callee_sym.id) {
                     record_symbols_from_edge(&mut symbols_map, &edge);
@@ -759,6 +885,105 @@ impl<'a, S: SemanticProvider> QueryEngine<'a, S> {
             diagnostics: Vec::new(),
             metrics: metrics.clone(),
         })
+    }
+}
+
+/// 역방향 탐색으로 검증된 엣지에서 최상위 호출자별 최단 경로 구성
+fn build_caller_paths(target: &SymbolId, edges: &[CallEdge]) -> Vec<CallPath> {
+    let mut adjacency: BTreeMap<SymbolId, Vec<(SymbolId, CallEdgeId)>> = BTreeMap::new();
+    let mut callers = BTreeSet::new();
+    let mut callees = BTreeSet::new();
+
+    for edge in edges {
+        let Some(callee) = &edge.callee else {
+            continue;
+        };
+
+        adjacency
+            .entry(edge.caller.clone())
+            .or_default()
+            .push((callee.clone(), edge.id));
+        callers.insert(edge.caller.clone());
+        callees.insert(callee.clone());
+    }
+
+    for next in adjacency.values_mut() {
+        next.sort();
+        next.dedup();
+    }
+
+    let mut roots = callers
+        .difference(&callees)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // 순환 그래프에는 진입 차수가 0인 루트가 없을 수 있다. 이때는 대상이 아닌
+    // 첫 발견 심볼 하나를 시작점으로 사용해 최소한의 순환 경로를 보여준다.
+    if roots.is_empty() {
+        if let Some(fallback) = callers.iter().find(|symbol| *symbol != target) {
+            roots.push(fallback.clone());
+        }
+    }
+
+    roots
+        .into_iter()
+        .filter_map(|root| shortest_path(&root, target, &adjacency))
+        .collect()
+}
+
+/// 검증된 호출 인접 목록에서 두 심볼 사이의 결정론적 최단 경로 계산
+fn shortest_path(
+    source: &SymbolId,
+    target: &SymbolId,
+    adjacency: &BTreeMap<SymbolId, Vec<(SymbolId, CallEdgeId)>>,
+) -> Option<CallPath> {
+    let mut frontier = VecDeque::from([source.clone()]);
+    let mut visited = BTreeSet::from([source.clone()]);
+    let mut predecessors: BTreeMap<SymbolId, (SymbolId, CallEdgeId)> = BTreeMap::new();
+
+    while let Some(current) = frontier.pop_front() {
+        if &current == target {
+            break;
+        }
+
+        for (next, edge_id) in adjacency.get(&current).into_iter().flatten() {
+            if visited.insert(next.clone()) {
+                predecessors.insert(next.clone(), (current.clone(), *edge_id));
+                frontier.push_back(next.clone());
+            }
+        }
+    }
+
+    if !visited.contains(target) {
+        return None;
+    }
+
+    let mut nodes = vec![target.clone()];
+    let mut path_edges = Vec::new();
+    let mut current = target.clone();
+
+    while &current != source {
+        let (previous, edge_id) = predecessors.get(&current)?;
+        nodes.push(previous.clone());
+        path_edges.push(*edge_id);
+        current = previous.clone();
+    }
+
+    nodes.reverse();
+    path_edges.reverse();
+    Some(CallPath {
+        nodes,
+        edges: path_edges,
+    })
+}
+
+/// 시맨틱 검증으로 얻은 caller/callee 메타데이터를 결과 심볼 맵에 병합
+fn record_verified_symbols(
+    symbols_map: &mut BTreeMap<SymbolId, Symbol>,
+    symbols: Vec<Symbol>,
+) {
+    for symbol in symbols {
+        symbols_map.entry(symbol.id.clone()).or_insert(symbol);
     }
 }
 

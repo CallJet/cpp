@@ -61,8 +61,21 @@ fn test_query_engine_callers_and_callees() {
         !res.edges.is_empty(),
         "leaf의 호출자 엣지가 검증 반환되어야 함"
     );
+    assert_eq!(res.edges.len(), 2, "2-hop 호출자 체인이 모두 탐색되어야 함");
 
-    // 2. callees(root_fn) -> mid -> leaf
+    // 2. trace(leaf) -> root_fn -> mid -> leaf 경로 자동 구성
+    let trace_req = QueryRequest::Trace {
+        target: SymbolQuery::parse("leaf"),
+        max_depth: None,
+        verified_only: false,
+    };
+    let trace_res = engine.execute(trace_req).unwrap();
+    assert_eq!(trace_res.completion, Completion::Complete);
+    assert_eq!(trace_res.paths.len(), 1);
+    assert_eq!(trace_res.paths[0].nodes.len(), 3);
+    assert_eq!(trace_res.paths[0].edges.len(), 2);
+
+    // 3. callees(root_fn) -> mid -> leaf
     let callees_req = QueryRequest::Callees {
         source: SymbolQuery::parse("root_fn"),
         max_depth: None,
@@ -74,6 +87,24 @@ fn test_query_engine_callers_and_callees() {
         !res_callees.edges.is_empty(),
         "root_fn의 피호출자 엣지가 검증 반환되어야 함"
     );
+    assert_eq!(
+        res_callees.edges.len(),
+        2,
+        "2-hop 피호출자 체인이 모두 탐색되어야 함"
+    );
+
+    // 4. path(root_fn, leaf) -> root_fn -> mid -> leaf
+    let path_req = QueryRequest::Path {
+        source: SymbolQuery::parse("root_fn"),
+        target: SymbolQuery::parse("leaf"),
+        max_depth: None,
+        verified_only: false,
+    };
+    let path_res = engine.execute(path_req).unwrap();
+    assert_eq!(path_res.completion, Completion::Complete);
+    assert_eq!(path_res.paths.len(), 1);
+    assert_eq!(path_res.paths[0].nodes.len(), 3);
+    assert_eq!(path_res.paths[0].edges.len(), 2);
 }
 
 #[test]

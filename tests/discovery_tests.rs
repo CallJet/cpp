@@ -287,3 +287,57 @@ fn test_discovery_malformed_source_handling() {
         "문법 에러가 있어도 정상 함수 valid_func는 복구 추출되어야 함"
     );
 }
+
+#[test]
+fn test_query_discovery_parses_only_text_prefilter_matches() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let target_file = root.join("target.cpp");
+    let unrelated_a = root.join("unrelated_a.cpp");
+    let unrelated_b = root.join("unrelated_b.cpp");
+
+    fs::write(&target_file, "void target_method() {}\n").unwrap();
+    fs::write(&unrelated_a, "void unrelated_alpha() {}\n").unwrap();
+    fs::write(&unrelated_b, "void unrelated_beta() {}\n").unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([
+            {
+                "directory": root.to_str().unwrap(),
+                "file": "target.cpp",
+                "command": "clang++ -c target.cpp"
+            },
+            {
+                "directory": root.to_str().unwrap(),
+                "file": "unrelated_a.cpp",
+                "command": "clang++ -c unrelated_a.cpp"
+            },
+            {
+                "directory": root.to_str().unwrap(),
+                "file": "unrelated_b.cpp",
+                "command": "clang++ -c unrelated_b.cpp"
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root.to_path_buf(),
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let mut index = DiscoveryIndex::default();
+    assert!(index.source_files.is_empty());
+
+    let query = SymbolQuery::parse("target_method");
+    index.discover_query(&project, &query);
+
+    assert_eq!(index.source_files_inspected, 3);
+    assert_eq!(index.source_files.len(), 1);
+    assert_eq!(index.source_files[0], fs::canonicalize(target_file).unwrap());
+    assert_eq!(index.matching_symbols(&query).len(), 1);
+}

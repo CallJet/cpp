@@ -201,3 +201,45 @@ fn test_project_context_load_and_source_enumeration() {
     assert!(file_names.contains(&"header.h".to_string()));
     assert!(!file_names.contains(&"notes.txt".to_string()));
 }
+
+#[cfg(unix)]
+#[test]
+fn test_source_enumeration_does_not_follow_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+
+    let main_cpp = root.join("main.cpp");
+    let outside_cpp = outside.join("outside.cpp");
+    fs::write(&main_cpp, "int main() {}").unwrap();
+    fs::write(&outside_cpp, "void outside() {}").unwrap();
+
+    symlink(&root, root.join("cycle")).unwrap();
+    symlink(&outside, root.join("external")).unwrap();
+
+    let db_path = root.join("compile_commands.json");
+    fs::write(
+        &db_path,
+        serde_json::json!([{
+            "directory": root.to_str().unwrap(),
+            "file": "main.cpp",
+            "command": "clang++ -c main.cpp"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let project = ProjectContext::load(ProjectInput {
+        source_root: root,
+        compile_commands_path: db_path,
+    })
+    .unwrap();
+
+    let source_files = project.source_files();
+    assert_eq!(source_files, vec![fs::canonicalize(main_cpp).unwrap()]);
+    assert!(!source_files.contains(&fs::canonicalize(outside_cpp).unwrap()));
+}

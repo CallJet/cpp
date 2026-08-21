@@ -207,6 +207,14 @@ impl CompilationDb {
         &[]
     }
 
+    /// 고유 키에 해당하는 컴파일 컨텍스트 조회
+    pub fn context_by_key(&self, key: &CompilationKey) -> Option<&CompilationContext> {
+        self.source_file_to_contexts
+            .values()
+            .flatten()
+            .find(|context| &context.key == key)
+    }
+
     /// 데이터베이스에 등록된 모든 고유 소스 파일 목록 반환
     pub fn all_source_files(&self) -> Vec<PathBuf> {
         self.source_file_to_contexts.keys().cloned().collect()

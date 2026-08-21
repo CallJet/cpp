@@ -109,6 +109,10 @@ fn test_poc_demand_driven_efficiency_hypothesis() {
     // 전체 12개 TU 중 오직 관련된 2개 TU 이하만 Clang 시맨틱 파싱되어야 하며,
     // 10개의 무관한 TU는 Clang 파싱을 완전히 건너뛰어야 함!
     assert_eq!(total_tus, 12);
+    assert!(
+        res.metrics.source_files_parsed_by_treesitter <= 2,
+        "Tree-sitter도 텍스트 prefilter와 일치한 관련 파일만 파싱해야 함"
+    );
     assert!(parsed_tus <= 2, "포커스된 쿼리는 무관한 10개 TU를 파싱하지 않고 오직 관련 TU({parsed_tus}개)만 파싱해야 함!");
     assert!(parsed_tus < total_tus);
 }
