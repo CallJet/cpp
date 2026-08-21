@@ -55,48 +55,145 @@ cargo build --release
 
 For the common case, pass one method to `trace`. The lower-level commands remain available for directional and two-endpoint queries.
 
+### Which command should I use?
+
+| Question | Command | Search direction | Default text output |
+| --- | --- | --- | --- |
+| “Where does execution enter this method?” | `trace <METHOD>` | Reverse, from target toward callers | Discovered top-level caller → target paths |
+| “Who calls this function?” | `callers <TARGET>` | Reverse, from target toward callers | One deterministic shortest path per top-level caller |
+| “What does this function call downstream?” | `callees <SOURCE>` | Forward, from source toward callees | Source → downstream callee traversal order |
+
+The examples below use this source:
+
+```cpp
+namespace app {
+void flush() {}
+void save() { flush(); }
+void handle() { save(); }
+}
+
+void scheduled_job() { app::save(); }
+int main() { app::handle(); }
+```
+
 ### 1. `trace` — One-method Call Path
-Finds candidate paths from discovered top-level callers to one target method and upgrades edges when Clang verification is available.
+
+This is the common entry point. Given one method, it expands incoming calls in reverse and reconstructs a connected path from every discovered top-level caller to the requested target.
+
+* Search runs outward from the target toward callers, but output is ordered as **caller → callee → target**.
+* If multiple top-level callers exist, one deterministic shortest path is printed for each, separated by a blank line.
+* A complete direct, qualified, or member-call candidate remains a `[POSSIBLE]` path when Clang is unavailable or cannot obtain a referenced cursor.
+* A targetless `[UNRESOLVED]` call, such as an unidentifiable function-pointer target, is excluded because it cannot form a connected path to the requested method.
+* If the target symbol exists but no connected incoming edge is found, compact output is `결과 없음 (No Result)`.
 
 ```bash
 calljet trace <METHOD> [OPTIONS]
 
-# Example: Show how execution reaches Controller::dispatch
-calljet trace "Controller::dispatch" --root . --compile-commands build/compile_commands.json
+# Discover paths entering app::flush
+calljet trace "app::flush" --root . --compile-commands build/compile_commands.json
+```
+
+Default output:
+
+```text
+scheduled_job
+app::save
+app::flush
+
+main
+app::handle
+app::save
+app::flush
+```
+
+```bash
+# Expand at most 2 incoming call edges from the target
+calljet trace "app::flush" --max-depth 2
+
+# Show callsites and confidence for each path
+calljet trace "app::flush" -v
+
+# Construct paths using only Clang-CONFIRMED edges
+calljet trace "app::flush" --verified-only
 ```
 
 ---
 
 ### 2. `callers` — Reverse Caller Traversal
-Finds all callers that lead to a specific target function/symbol on demand.
-Default text output consumes the reconstructed paths from each top-level caller to the requested callee directly.
+
+Finds direct callers of a target symbol, then repeatedly treats each caller as the next reverse-search target to build its upstream caller chain. It reconstructs the same connected reverse paths as `trace`, while retaining lower-level caller-analysis evidence.
+
+* Compact text is ordered as **top-level caller → requested target**, never target-first reverse order.
+* If one top-level caller can reach the target through several routes, the compact path list selects one deterministic shortest path. Use JSON to inspect the complete edge set.
+* Complete Tree-sitter call candidates remain target-connected `[POSSIBLE]` edges when Clang reference resolution fails, so reverse traversal can continue.
+* A genuinely indirect call whose target cannot be identified may remain as targetless `[UNRESOLVED]` evidence. It is omitted from compact text and never expands the reverse frontier because it is not a connected path.
+* `--max-depth N` treats the requested target as depth 0 and expands at most `N` incoming caller edges.
 
 ```bash
 calljet callers <TARGET_SYMBOL> [OPTIONS]
 
-# Example: Find all callers of LeafFunction
-calljet callers LeafFunction --root . --compile-commands build/compile_commands.json
+# Discover the upstream caller chains of app::save
+calljet callers "app::save" --root . --compile-commands build/compile_commands.json
+```
 
-# Example: Limit search depth to 2 hops
-calljet callers Math::Calculator::add --max-depth 2
+Default output:
 
-# Example: Traverse only verified direct calls (CONFIRMED)
-calljet callers process_data --verified-only
+```text
+scheduled_job
+app::save
+
+main
+app::handle
+app::save
+```
+
+```bash
+# Stop after the direct callers of app::save
+calljet callers "app::save" --max-depth 1
+
+# Save the complete edge, confidence, and context data
+calljet callers "app::save" --format json --output callers.json
+
+# Traverse only Clang-CONFIRMED edges
+calljet callers "app::save" --verified-only
 ```
 
 ---
 
 ### 3. `callees` — Forward Callee Traversal
-Finds all downstream functions invoked from a given source function/symbol on demand.
+
+Finds calls inside one source symbol, then analyzes each identified callee to expand the downstream call graph in the forward direction.
+
+* Search and output both follow **source caller → downstream callee** direction.
+* Calls made by the same function are visited in callsite source order. A symbol shared by several branches is printed once in compact text.
+* `--max-depth N` treats the source as depth 0 and expands at most `N` outgoing callee edges.
+* An `[UNRESOLVED]` edge without a callee identity may remain as evidence, but it cannot expand the downstream frontier.
+* Use `-v`, JSON, Mermaid, or DOT output when exact branches and edge relationships matter.
 
 ```bash
 calljet callees <SOURCE_SYMBOL> [OPTIONS]
 
-# Example: Find all callees starting from main
-calljet callees main --root .
+# Discover downstream calls starting from app::handle
+calljet callees "app::handle" --root . --compile-commands build/compile_commands.json
+```
 
-# Example: Target a qualified C++ method
-calljet callees "App::Controller::handle_request"
+Default output:
+
+```text
+app::handle
+app::save
+app::flush
+```
+
+```bash
+# Expand 2 outgoing edges from main: main, app::handle, app::save
+calljet callees main --max-depth 2
+
+# Save the branch structure as Mermaid
+calljet callees main --format mermaid --output callees.mmd
+
+# Traverse only Clang-CONFIRMED edges
+calljet callees "app::handle" --verified-only
 ```
 
 ---

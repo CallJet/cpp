@@ -52,48 +52,145 @@ cargo build --release
 
 일반적인 사용은 메서드 하나만 `trace`에 전달하면 됩니다. 방향이나 양 끝점을 직접 지정하는 하위 명령도 그대로 제공합니다.
 
+### 어떤 명령을 선택해야 하나?
+
+| 질문 | 명령 | 탐색 방향 | 기본 text 출력 |
+| --- | --- | --- | --- |
+| “이 메서드까지 어디서 들어오지?” | `trace <METHOD>` | 대상에서 caller 방향으로 역추적 | 발견된 최상위 caller → 대상 메서드 경로 |
+| “이 함수를 누가 호출하지?” | `callers <TARGET>` | 대상에서 caller 방향으로 역추적 | 최상위 caller별 결정적 최단 경로 |
+| “이 함수가 아래로 무엇을 호출하지?” | `callees <SOURCE>` | source에서 callee 방향으로 순방향 추적 | source → 하위 callee 순회 순서 |
+
+아래 예시는 다음 소스를 기준으로 합니다.
+
+```cpp
+namespace app {
+void flush() {}
+void save() { flush(); }
+void handle() { save(); }
+}
+
+void scheduled_job() { app::save(); }
+int main() { app::handle(); }
+```
+
 ### 1. `trace` — 메서드 하나로 호출 경로 탐색
-발견된 최상위 호출자에서 대상 메서드까지 도달하는 후보 경로를 자동으로 출력하고, Clang을 사용할 수 있으면 각 엣지를 시맨틱 검증합니다.
+
+가장 일반적인 명령입니다. 메서드 하나를 주면 해당 메서드를 호출하는 지점을 역방향으로 확장하여, 발견된 각 최상위 caller에서 대상까지 연결되는 경로를 만듭니다.
+
+* 탐색은 대상에서 바깥쪽 caller 방향으로 진행하지만, 출력은 읽기 쉬운 **caller → callee → 대상** 순서입니다.
+* 최상위 caller가 여러 개면 caller마다 결정적인 최단 경로 하나를 출력하며 경로 사이는 빈 줄로 구분합니다.
+* Tree-sitter가 완전한 direct/qualified/member 호출을 찾았지만 Clang 검증이 불가능하거나 참조 cursor를 찾지 못하면 `[POSSIBLE]` 경로로 계속 탐색합니다.
+* 함수 포인터처럼 대상과 연결할 수 없는 targetless `[UNRESOLVED]` 호출은 경로에 넣지 않습니다.
+* 대상 심볼은 존재하지만 연결된 caller edge가 없으면 `결과 없음 (No Result)`을 출력합니다.
 
 ```bash
 calljet trace <METHOD> [OPTIONS]
 
-# 예시: Controller::dispatch까지 들어오는 호출 경로 자동 탐색
-calljet trace "Controller::dispatch" --root . --compile-commands build/compile_commands.json
+# app::flush까지 들어오는 경로 자동 탐색
+calljet trace "app::flush" --root . --compile-commands build/compile_commands.json
+```
+
+기본 출력:
+
+```text
+scheduled_job
+app::save
+app::flush
+
+main
+app::handle
+app::save
+app::flush
+```
+
+```bash
+# 대상에서 역방향으로 최대 2개 호출 edge까지만 확장
+calljet trace "app::flush" --max-depth 2
+
+# 경로별 callsite와 신뢰도 확인
+calljet trace "app::flush" -v
+
+# Clang이 CONFIRMED한 edge만 사용해 경로 구성
+calljet trace "app::flush" --verified-only
 ```
 
 ---
 
 ### 2. `callers` — 역방향 호출자 탐색
-특정 함수/심볼을 호출하는 모든 상위 함수 체인을 온디맨드로 역추적합니다.
-기본 텍스트 출력은 최상위 caller에서 요청한 callee까지의 경로 순서를 그대로 사용합니다.
+
+특정 대상 심볼의 직접 caller를 찾고, 찾은 caller를 다시 대상으로 삼아 상위 caller 체인을 반복해서 확장합니다. `trace`와 같은 역방향 경로를 만들지만, 호출자 분석용 저수준 결과도 보존합니다.
+
+* 기본 text 출력은 대상부터 거꾸로 표시하지 않고 **최상위 caller → 요청한 target** 순서로 표시합니다.
+* 각 최상위 caller에서 target까지 여러 경로가 있으면 기본 경로 목록에는 결정적인 최단 경로 하나가 선택됩니다. 전체 edge 집합은 JSON 출력에서 확인할 수 있습니다.
+* 완전한 Tree-sitter 호출 후보는 Clang 참조 해석이 실패해도 target에 연결된 `[POSSIBLE]` edge로 유지되어 상위 탐색을 계속합니다.
+* 대상 자체를 식별할 수 없는 진짜 간접 호출은 targetless `[UNRESOLVED]` 근거로 보존할 수 있지만, 연결 경로가 아니므로 compact text에는 나오지 않고 다음 frontier로도 확장되지 않습니다.
+* `--max-depth N`은 target을 깊이 0으로 보고 역방향 caller edge를 최대 `N`개까지 확장합니다.
 
 ```bash
 calljet callers <TARGET_SYMBOL> [OPTIONS]
 
-# 예시: LeafFunction을 호출하는 모든 경로 탐색
-calljet callers LeafFunction --root . --compile-commands build/compile_commands.json
+# app::save의 상위 caller 체인 탐색
+calljet callers "app::save" --root . --compile-commands build/compile_commands.json
+```
 
-# 예시: 최대 2단계 상위 호출자까지만 탐색
-calljet callers Math::Calculator::add --max-depth 2
+기본 출력:
 
-# 예시: 확정된(CONFIRMED) 직접 호출만 필터링하여 순회
-calljet callers process_data --verified-only
+```text
+scheduled_job
+app::save
+
+main
+app::handle
+app::save
+```
+
+```bash
+# app::save를 직접 호출하는 1단계 caller까지만 탐색
+calljet callers "app::save" --max-depth 1
+
+# 전체 edge, confidence, context를 구조화된 결과로 저장
+calljet callers "app::save" --format json --output callers.json
+
+# CONFIRMED edge만 사용해 역방향 순회
+calljet callers "app::save" --verified-only
 ```
 
 ---
 
 ### 3. `callees` — 순방향 피호출자 탐색
-특정 함수/심볼 내부에서 호출하는 하위 함수 체인을 온디맨드로 순방향 추적합니다.
+
+특정 source 심볼의 함수 본문에서 호출되는 callee를 찾고, 식별된 callee 내부를 다시 분석하여 하위 호출 그래프를 순방향으로 확장합니다.
+
+* 탐색과 출력 모두 **source caller → 하위 callee** 방향입니다.
+* 같은 함수에서 여러 함수를 호출하면 callsite 소스 위치 순으로 방문합니다. 여러 경로에서 공유되는 심볼은 compact text에 한 번만 표시됩니다.
+* `--max-depth N`은 source를 깊이 0으로 보고 순방향 callee edge를 최대 `N`개까지 확장합니다.
+* callee 식별자가 없는 `[UNRESOLVED]` edge는 근거로 남을 수 있지만, 다음 함수로 이동할 수 없으므로 하위 frontier를 확장하지 않습니다.
+* 경로 분기와 각 edge의 정확한 관계가 필요하면 `-v`, JSON, Mermaid 또는 DOT 출력을 사용합니다.
 
 ```bash
 calljet callees <SOURCE_SYMBOL> [OPTIONS]
 
-# 예시: main 함수에서 출발하는 모든 하위 호출 관계 탐색
-calljet callees main --root .
+# app::handle에서 시작하는 하위 호출 탐색
+calljet callees "app::handle" --root . --compile-commands build/compile_commands.json
+```
 
-# 예시: 네임스페이스 및 클래스 메서드 지정
-calljet callees "App::Controller::handle_request"
+기본 출력:
+
+```text
+app::handle
+app::save
+app::flush
+```
+
+```bash
+# main에서 2개 호출 edge까지만 순방향 확장: main, app::handle, app::save
+calljet callees main --max-depth 2
+
+# 분기 구조를 Mermaid 파일로 저장
+calljet callees main --format mermaid --output callees.mmd
+
+# CONFIRMED edge만 사용해 하위 순회
+calljet callees "app::handle" --verified-only
 ```
 
 ---
