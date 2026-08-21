@@ -32,6 +32,8 @@ Traditional static analysis tools parse the entire codebase with a compiler fron
   * **macOS**: `brew install llvm`
 * **Compilation Database**: `compile_commands.json` for your project
   * When using CMake: `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+  * If the file is missing, CallJet stops before source parsing and prints the
+    exact CMake generation command plus the `--compile-commands` invocation.
 
 ---
 

@@ -3,6 +3,7 @@
 
 pub mod cli;
 pub mod compile_db;
+pub mod console;
 pub mod diagnostic;
 pub mod discovery;
 pub mod model;
